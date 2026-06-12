@@ -156,16 +156,19 @@ class GazeCursor:
         self._alpha = 0.15  # always minimally visible
         self._alpha_step = 0.06
         self._pulse_t = 0.0
+        self.display_x = None
+        self.display_y = None
 
     def update(self, x: float, y: float, active: bool):
         """Update state.  Called every frame."""
         self._pulse_t += 0.1
         if active:
             self._alpha = min(self._alpha + self._alpha_step, 1.0)
-            self._trail.append((x, y))
         else:
-            self._trail.append((x, y))  # still track position
             self._alpha = max(self._alpha - self._alpha_step, 0.15)
+        dx = self.display_x if self.display_x is not None else x
+        dy = self.display_y if self.display_y is not None else y
+        self._trail.append((dx, dy))
 
     def draw(self, canvas: np.ndarray):
         """Draw cursor with trail and glow."""

@@ -16,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 import argparse
 import sys
 import time
+import threading
 from pathlib import Path
 
 import cv2
@@ -33,6 +34,84 @@ from eyetrax.utils.screen import get_screen_size
 from modules.object_detector import ObjectDetector
 from modules.ui import draw_text_stroke
 from modules.ui import Theme, TopBar, GazeCursor, PIPDisplay, HUDInfo
+
+
+class DoubleBlinkDetector:
+    def __init__(self, window=1.2):
+        self.window = window
+        self._times = []
+        self._was = False
+
+    def update(self, blinking, now=None):
+        if now is None:
+            now = time.time()
+        triggered = False
+        if not blinking and self._was:
+            self._times.append(now)
+            cutoff = now - self.window
+            self._times = [t for t in self._times if t >= cutoff]
+            if len(self._times) >= 2:
+                self._times = []
+                triggered = True
+        self._was = blinking
+        return triggered
+
+
+class DelayedPosition:
+    def __init__(self, delay=0.5):
+        self.delay = delay
+        self._buf = []
+
+    def push(self, x, y, now=None):
+        if now is None:
+            now = time.time()
+        self._buf.append((now, x, y))
+
+    def get(self, now=None):
+        if now is None:
+            now = time.time()
+        cutoff = now - self.delay
+        # Prune old entries
+        while self._buf and self._buf[0][0] < cutoff:
+            self._buf.pop(0)
+        if not self._buf:
+            return None, None
+        return self._buf[0][1], self._buf[0][2]
+
+
+class SpeechOutput:
+    def __init__(self, cooldown=2.0):
+        self._engine = None
+        self._last = 0.0
+        self._cooldown = cooldown
+
+    def _init(self):
+        if self._engine is not None:
+            return
+        import pyttsx3
+        self._engine = pyttsx3.init()
+        self._engine.setProperty('rate', 150)
+
+    def speak(self, text):
+        now = time.time()
+        if now - self._last < self._cooldown:
+            return
+        self._last = now
+        self._init()
+        threading.Thread(target=self._speak, args=(text,), daemon=True).start()
+
+    def _speak(self, text):
+        self._engine.say(text)
+        self._engine.runAndWait()
+
+
+NEAR_THRESHOLD = 0.05  # bbox area / frame area > this → "This"
+
+
+def _is_near(bbox, frame_area):
+    x1, y1, x2, y2 = bbox
+    area = (x2 - x1) * (y2 - y1)
+    return area / frame_area > NEAR_THRESHOLD
 
 
 DEFAULT_MODEL_PATH = os.path.expanduser("~/.cache/fogaze3/eyetrax_model.pkl")
@@ -93,7 +172,7 @@ def _wait_for_spacebar(sw, sh, message="Press SPACEBAR to start"):
 
 
 def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
-                       capture_frames=15, grid_cols=3, grid_rows=3):
+                       capture_frames=50, grid_cols=3, grid_rows=3):
     """Grid calibration: fixed circles on scene camera feed.
 
     User looks at the real-world area each circle covers.
@@ -315,7 +394,7 @@ def main():
 
     if not _is_trained(gaze_estimator.model):
         print("[FoGaze] No valid model — starting calibration")
-        print("[FoGaze] Look at the circled area on screen. Auto-capturing...")
+        print("[FoGaze] Look at the circled area on scene camera. Then rotate head slowly at center.")
 
         # Custom two-camera calibration: scene cam shows targets, face cam captures features
         cap_tmp_face = cv2.VideoCapture(face_cam)
@@ -395,6 +474,10 @@ def main():
     cal_notified = False
     pip_face = None
 
+    blink_detector = DoubleBlinkDetector()
+    speech = SpeechOutput()
+    delayed_pos = DelayedPosition(delay=0.2)
+
     fps_n = 0
     fps_t0 = time.perf_counter()
     fps_val = 0
@@ -454,6 +537,14 @@ def main():
             gx_scene = int(gx)
             gy_scene = int(gy)
 
+            # Delayed position used for everything (ตาไปก่อน จุดค่อยตาม)
+            delayed_pos.push(gx_scene, gy_scene)
+            dx, dy = delayed_pos.get()
+            if dx is None:
+                dx, dy = gx_scene, gy_scene
+
+            cursor.display_x = dx
+            cursor.display_y = dy
             cursor.update(gx_scene, gy_scene, gaze_active)
 
             # ── Object detection (scene camera) ───────────────────────
@@ -463,9 +554,21 @@ def main():
             if gaze_active:
                 for det in detections:
                     x1, y1, x2, y2 = det["bbox"]
-                    if x1 <= gx_scene <= x2 and y1 <= gy_scene <= y2:
+                    if x1 <= dx <= x2 and y1 <= dy <= y2:
                         focused = det
                         break
+
+            # ── Double-blink → speech ──────────────────────────────────
+            if blink_detector.update(blink_detected, time.time()):
+                if focused:
+                    prefix = "This" if _is_near(
+                        focused["bbox"], w_scene * h_scene) else "That"
+                    speech.speak(f"{prefix} {focused['class_name']}")
+                else:
+                    cx_s, cy_s = sw / 2, sh / 2
+                    near = (abs(dx - cx_s) + abs(dy - cy_s)
+                            ) / (sw + sh) * 2 < 0.3
+                    speech.speak("This" if near else "That")
 
             # ── Face camera PIP ───────────────────────────────────────
             pip_face = None
@@ -528,7 +631,7 @@ def main():
             if focused:
                 cx_f = (focused["bbox"][0] + focused["bbox"][2]) // 2
                 cy_f = (focused["bbox"][1] + focused["bbox"][3]) // 2
-                cv2.line(canvas, (gx_scene, gy_scene), (cx_f, cy_f),
+                cv2.line(canvas, (dx, dy), (cx_f, cy_f),
                          Theme.ACCENT_GREEN, 1, cv2.LINE_AA)
 
             # Gaze cursor
@@ -552,7 +655,7 @@ def main():
                  else Theme.ACCENT_ORANGE),
                 (f"Focus: {focused['class_name'] if focused else '--'}",
                  Theme.ACCENT_GREEN if focused else Theme.TEXT_DIM),
-                (f"Gaze: ({gx_scene}, {gy_scene})", Theme.TEXT_DIM),
+                (f"Gaze: ({dx}, {dy})", Theme.TEXT_DIM),
             ])
 
             # Face PIP (bottom-right)
