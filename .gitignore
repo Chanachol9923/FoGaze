@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 *.pkl
 *.task
+experiments/
+calibration.npz
+models/
