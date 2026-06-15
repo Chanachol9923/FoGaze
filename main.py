@@ -21,6 +21,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from eyetrax.gaze import GazeEstimator
 from eyetrax.filters import (
@@ -33,7 +34,7 @@ from eyetrax.utils.screen import get_screen_size
 
 from modules.object_detector import ObjectDetector
 from modules.ui import draw_text_stroke
-from modules.ui import Theme, TopBar, GazeCursor, PIPDisplay, HUDInfo
+from modules.ui import Theme, TopBar, GazeCursor, HUDInfo
 
 
 class DoubleBlinkDetector:
@@ -55,28 +56,6 @@ class DoubleBlinkDetector:
                 triggered = True
         self._was = blinking
         return triggered
-
-
-class DelayedPosition:
-    def __init__(self, delay=0.5):
-        self.delay = delay
-        self._buf = []
-
-    def push(self, x, y, now=None):
-        if now is None:
-            now = time.time()
-        self._buf.append((now, x, y))
-
-    def get(self, now=None):
-        if now is None:
-            now = time.time()
-        cutoff = now - self.delay
-        # Prune old entries
-        while self._buf and self._buf[0][0] < cutoff:
-            self._buf.pop(0)
-        if not self._buf:
-            return None, None
-        return self._buf[0][1], self._buf[0][2]
 
 
 class SpeechOutput:
@@ -105,13 +84,65 @@ class SpeechOutput:
         self._engine.runAndWait()
 
 
-NEAR_THRESHOLD = 0.05  # bbox area / frame area > this → "This"
+
+ZONE_PHRASES = [
+    "At My Upper Left Hand",
+    "At My Upper Side",
+    "At My Upper Right Hand",
+    "At My Left Hand",
+    "In Front of me",
+    "At My Right Hand",
+    "At My Lower Left Hand",
+    "At My Lower Side",
+    "At My Lower Right Hand",
+]
+
+THING_THRESHOLD = 0.2  # below this → say "That Thing" instead of class
+
+def _zone_for(gx, gy, w, h):
+    c1, c2 = int(w * 0.22), int(w * 0.78)
+    r1, r2 = int(h * 0.22), int(h * 0.78)
+    col = 0 if gx < c1 else (1 if gx < c2 else 2)
+    row = 0 if gy < r1 else (1 if gy < r2 else 2)
+    return row * 3 + col, (c1, c2, r1, r2)
 
 
-def _is_near(bbox, frame_area):
-    x1, y1, x2, y2 = bbox
-    area = (x2 - x1) * (y2 - y1)
-    return area / frame_area > NEAR_THRESHOLD
+def _get_relation(a, b, w, h):
+    x1a, y1a, x2a, y2a = a["bbox"]
+    x1b, y1b, x2b, y2b = b["bbox"]
+    xi1 = max(x1a, x1b); yi1 = max(y1a, y1b)
+    xi2 = min(x2a, x2b); yi2 = min(y2a, y2b)
+    inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    aa = (x2a - x1a) * (y2a - y1a)
+    ab = (x2b - x1b) * (y2b - y1b)
+    iou = inter / (aa + ab - inter) if (aa + ab - inter) > 0 else 0
+    if iou > 0.25:
+        return "In"
+    cx_a, cy_a = (x1a + x2a) / 2, (y1a + y2a) / 2
+    cx_b, cy_b = (x1b + x2b) / 2, (y1b + y2b) / 2
+    m = min(w, h) * 0.02
+    if abs(y2a - y1b) < m and x1b <= cx_a <= x2b:
+        return "On"
+    if abs(y1a - y2b) < m and x1b <= cx_a <= x2b:
+        return "Under"
+    if y1a <= y2b and y2a >= y1b:
+        if abs(x2a - x1b) < m * 2 or abs(x2b - x1a) < m * 2:
+            return "Next To"
+    dist = ((cx_a - cx_b)**2 + (cy_a - cy_b)**2)**0.5
+    th = ((x2a - x1a + x2b - x1b) / 4 + (y2a - y1a + y2b - y1b) / 4) * 0.5
+    if dist < th * 1.5:
+        return "Near"
+    if cy_a > cy_b + m and abs(cx_a - cx_b) < (x2a - x1a + x2b - x1b) / 2:
+        return "Behind"
+    return None
+
+_CJK_FONT_PATH = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
+_cjk_fonts = {}
+
+def _cjk_font(size):
+    if size not in _cjk_fonts:
+        _cjk_fonts[size] = ImageFont.truetype(_CJK_FONT_PATH, size)
+    return _cjk_fonts[size]
 
 
 DEFAULT_MODEL_PATH = os.path.expanduser("~/.cache/fogaze3/eyetrax_model.pkl")
@@ -172,7 +203,7 @@ def _wait_for_spacebar(sw, sh, message="Press SPACEBAR to start"):
 
 
 def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
-                       capture_frames=50, grid_cols=3, grid_rows=3):
+                       capture_frames=250, grid_cols=3, grid_rows=3):
     """Grid calibration: fixed circles on scene camera feed.
 
     User looks at the real-world area each circle covers.
@@ -197,6 +228,51 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
     targets = [(int(x), int(y)) for y in ys for x in xs]
 
     collected = []  # list of [scene_x, scene_y, features]
+
+    # ── Step-by-step instructions (EN + JP, black bg) ─────────────────
+    guide_items = [
+        ("─── Calibration Guide ───────────────────", 24, (0, 255, 255)),
+        ("", 0, None),
+        ("Step 1  —  Face detection", 22, (0, 230, 0)),
+        ("  Position your face in front of the face camera", 18, (220, 220, 220)),
+        ("  顔カメラの前に座って顔を映してください", 18, (160, 160, 160)),
+        ("", 0, None),
+        ("Step 2  —  Look at the target & press ENTER", 22, (0, 230, 0)),
+        ("  Look at the circled point, then press ENTER to capture", 18, (220, 220, 220)),
+        ("  丸いターゲットを見て、ENTERを押して撮影", 18, (160, 160, 160)),
+        ("", 0, None),
+        ("Step 3  —  Rotate your head during capture", 22, (0, 230, 0)),
+        ("  Keep your eyes on the target, slowly rotate your head", 18, (220, 220, 220)),
+        ("  ターゲットを見たままゆっくり頭を動かしてください", 18, (160, 160, 160)),
+        ("", 0, None),
+        ("Step 4  —  Repeat for all 9 points", 22, (0, 230, 0)),
+        ("  ENTER=capture  BACKSPACE=undo last point  ESC=finish", 18, (220, 220, 220)),
+        ("  ENTER=撮影  BACKSPACE=戻る  ESC=終了", 18, (160, 160, 160)),
+        ("", 0, None),
+        ("Press ENTER to start", 26, (0, 255, 255)),
+    ]
+    while True:
+        ret_s, frame_s = cap_scene.read()
+        if not ret_s:
+            continue
+        canvas = np.zeros((h_s, w_s, 3), dtype=np.uint8)
+        pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        y = 50
+        for txt, size, color in guide_items:
+            if not txt:
+                y += 12
+                continue
+            draw.text((80, y), txt, font=_cjk_font(size), fill=color)
+            y += size + 8
+        canvas[:] = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
+        cv2.imshow(win, canvas)
+        k = cv2.waitKey(1) & 0xFF
+        if k == 13:
+            break
+        if k == 27:
+            cv2.destroyWindow(win)
+            return False
 
     # ── Wait for face once ────────────────────────────────────────────
     fd_start = None
@@ -278,17 +354,21 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
                         cv2.flip(frame_f2, 1))
                     if ft is not None and not blink:
                         collected.append([tx, ty, ft])
-                # Brief feedback
-                for _ in range(4):
+                # Green flash + beep × 2
+                for _ in range(2):
                     ret_s2, fb = cap_scene.read()
-                    if not ret_s2:
-                        continue
-                    fb2 = fb.copy()
-                    cv2.circle(fb2, (tx, ty), 25, Theme.ACCENT_GREEN, -1)
-                    cv2.putText(fb2, "Captured!", (50, 50),
-                                font, 1.2, Theme.ACCENT_GREEN, 2)
-                    cv2.imshow(win, fb2)
-                    cv2.waitKey(1)
+                    if ret_s2:
+                        fb2 = fb.copy()
+                        cv2.rectangle(fb2, (0, 0), (w_s, h_s),
+                                      (0, 230, 0), -1)
+                        cv2.putText(fb2, "Done!", (w_s // 2 - 80, h_s // 2),
+                                    font, 2, (255, 255, 255), 3)
+                        cv2.imshow(win, fb2)
+                        cv2.waitKey(1)
+                    # Beep via multiple methods
+                    print('\a', end='', flush=True)
+                    os.system('echo -ne "\\a" > /dev/tty 2>/dev/null &')
+                    cv2.waitKey(200)
                 break  # move to next point
 
             if key == 8:  # BACKSPACE — undo last point
@@ -466,17 +546,16 @@ def main():
     topbar = TopBar()
     cursor = GazeCursor()
     hud = HUDInfo()
-    pip_display = PIPDisplay(face_size=160, iris_size=90)
 
     # ── State ─────────────────────────────────────────────────────────
     gaze_active = False
     focused = None
     cal_notified = False
-    pip_face = None
 
     blink_detector = DoubleBlinkDetector()
     speech = SpeechOutput()
-    delayed_pos = DelayedPosition(delay=0.2)
+    last_valid_gx = sw // 2
+    last_valid_gy = sh // 2
 
     fps_n = 0
     fps_t0 = time.perf_counter()
@@ -491,6 +570,11 @@ def main():
     cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
     cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN,
                           cv2.WINDOW_FULLSCREEN)
+
+    face_win = "Face Camera"
+    cv2.namedWindow(face_win, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(face_win, 320, 240)
+    cv2.moveWindow(face_win, 50, 50)
 
     try:
         while True:
@@ -517,7 +601,7 @@ def main():
                 frame_face
             )
 
-            gx, gy = sw / 2.0, sh / 2.0
+            gx, gy = last_valid_gx, last_valid_gy
             gaze_active = False
 
             if features is not None and not blink_detected:
@@ -530,21 +614,11 @@ def main():
 
             if gaze_active:
                 gx, gy = smoother.step(gx, gy)
-            else:
-                gx, gy = sw / 2.0, sh / 2.0
+                last_valid_gx, last_valid_gy = int(gx), int(gy)
 
-            # Map screen coords → scene frame coords
             gx_scene = int(gx)
             gy_scene = int(gy)
 
-            # Delayed position used for everything (ตาไปก่อน จุดค่อยตาม)
-            delayed_pos.push(gx_scene, gy_scene)
-            dx, dy = delayed_pos.get()
-            if dx is None:
-                dx, dy = gx_scene, gy_scene
-
-            cursor.display_x = dx
-            cursor.display_y = dy
             cursor.update(gx_scene, gy_scene, gaze_active)
 
             # ── Object detection (scene camera) ───────────────────────
@@ -554,30 +628,55 @@ def main():
             if gaze_active:
                 for det in detections:
                     x1, y1, x2, y2 = det["bbox"]
-                    if x1 <= dx <= x2 and y1 <= dy <= y2:
+                    if x1 <= gx_scene <= x2 and y1 <= gy_scene <= y2:
                         focused = det
                         break
 
-            # ── Double-blink → speech ──────────────────────────────────
-            if blink_detector.update(blink_detected, time.time()):
-                if focused:
-                    prefix = "This" if _is_near(
-                        focused["bbox"], w_scene * h_scene) else "That"
-                    speech.speak(f"{prefix} {focused['class_name']}")
-                else:
-                    cx_s, cy_s = sw / 2, sh / 2
-                    near = (abs(dx - cx_s) + abs(dy - cy_s)
-                            ) / (sw + sh) * 2 < 0.3
-                    speech.speak("This" if near else "That")
+            # ── Relationship detection (all pairs) ────────────────────
+            relations = {}  # (id_a, id_b) → rel
+            for i, da in enumerate(detections):
+                for j, db in enumerate(detections):
+                    if i >= j:
+                        continue
+                    rel = _get_relation(da, db, w_scene, h_scene)
+                    if rel:
+                        relations[(i, j)] = rel
+            focused_rel = None
+            if focused is not None:
+                fi = detections.index(focused)
+                for (i, j), rel in relations.items():
+                    if i == fi:
+                        focused_rel = (rel, detections[j])
+                        break
+                    if j == fi:
+                        focused_rel = (rel, detections[i])
+                        break
 
-            # ── Face camera PIP ───────────────────────────────────────
-            pip_face = None
+            # ── Double-blink → speech (zone + relation) ───────────────
+            if blink_detector.update(blink_detected, time.time()):
+                zi, _ = _zone_for(gx_scene, gy_scene, w_scene, h_scene)
+                phrase = ZONE_PHRASES[zi]
+                if focused:
+                    name = (focused['class_name'] if
+                            focused['confidence'] >= THING_THRESHOLD
+                            else "That Thing")
+                    if focused_rel:
+                        speech.speak(
+                            f"{name} {focused_rel[0]} "
+                            f"{focused_rel[1]['class_name']} {phrase}")
+                    else:
+                        speech.speak(f"{name} {phrase}")
+                else:
+                    speech.speak(phrase)
+
+            # ── Face camera display (separate window) ─────────────────
+            face_display = frame_face.copy()
             if (features is not None
                     and hasattr(gaze_estimator, '_face_landmarker')):
                 try:
                     import mediapipe as mp
                     rgb = np.ascontiguousarray(
-                        cv2.cvtColor(frame_face, cv2.COLOR_BGR2RGB)
+                        cv2.cvtColor(face_display, cv2.COLOR_BGR2RGB)
                     )
                     mp_img = mp.Image(
                         image_format=mp.ImageFormat.SRGB, data=rgb
@@ -588,7 +687,7 @@ def main():
                     )
                     if result and result.face_landmarks:
                         lm = result.face_landmarks[0]
-                        h_f, w_f = frame_face.shape[:2]
+                        h_f, w_f = face_display.shape[:2]
                         xs = [p.x for p in lm]
                         ys = [p.y for p in lm]
                         cx = (min(xs) + max(xs)) * 0.5 * w_f
@@ -600,10 +699,11 @@ def main():
                         fy1 = int(max(0, cy - hhh))
                         fy2 = int(min(h_f, cy + hhh))
                         if fx2 > fx1 and fy2 > fy1:
-                            crop = frame_face[fy1:fy2, fx1:fx2]
-                            pip_face = cv2.resize(crop, (160, 160))
+                            cv2.rectangle(face_display, (fx1, fy1),
+                                          (fx2, fy2), Theme.ACCENT_GREEN, 2)
                 except Exception:
                     pass
+            cv2.imshow(face_win, face_display)
 
             # ── Canvas (scene feed + overlays) ────────────────────────
             canvas = frame_scene.copy()
@@ -627,11 +727,32 @@ def main():
                     (x1, y1 - 8), scale=0.5, color=color,
                 )
 
+            # 3×3 zone grid (center zone larger)
+            zi, (c1, c2, r1, r2) = _zone_for(
+                gx_scene, gy_scene, w_scene, h_scene)
+            cv2.line(canvas, (c1, 0), (c1, h_scene), (60, 60, 80), 1)
+            cv2.line(canvas, (c2, 0), (c2, h_scene), (60, 60, 80), 1)
+            cv2.line(canvas, (0, r1), (w_scene, r1), (60, 60, 80), 1)
+            cv2.line(canvas, (0, r2), (w_scene, r2), (60, 60, 80), 1)
+            draw_text_stroke(canvas, ZONE_PHRASES[zi],
+                             (12, h_scene - 60), scale=0.5,
+                             color=Theme.ACCENT_CYAN, thickness=1)
+            # Relationship text
+            if focused and focused_rel:
+                fname = (focused['class_name'] if
+                         focused['confidence'] >= THING_THRESHOLD
+                         else "That Thing")
+                draw_text_stroke(
+                    canvas,
+                    f"{fname} {focused_rel[0]} {focused_rel[1]['class_name']}",
+                    (12, h_scene - 36), scale=0.5,
+                    color=Theme.ACCENT_GREEN, thickness=1)
+
             # Focus indicator
             if focused:
                 cx_f = (focused["bbox"][0] + focused["bbox"][2]) // 2
                 cy_f = (focused["bbox"][1] + focused["bbox"][3]) // 2
-                cv2.line(canvas, (dx, dy), (cx_f, cy_f),
+                cv2.line(canvas, (gx_scene, gy_scene), (cx_f, cy_f),
                          Theme.ACCENT_GREEN, 1, cv2.LINE_AA)
 
             # Gaze cursor
@@ -647,19 +768,26 @@ def main():
 
             # HUD
             cal_status = "CAL" if _is_trained(gaze_estimator.model) else "UNCAL"
+            zi, _ = _zone_for(gx_scene, gy_scene, w_scene, h_scene)
+            fname = (focused['class_name'] if focused['confidence'] >= THING_THRESHOLD
+                     else "That Thing") if focused else "--"
+            rel_txt = (f"{fname} {focused_rel[0]} "
+                       f"{focused_rel[1]['class_name']}"
+                       ) if focused_rel else "--"
             hud.draw(canvas, [
                 (f"Face cam:{face_cam}  Scene cam:{scene_cam}",
                  Theme.ACCENT_CYAN),
                 (f"EyeTrax {args.model.upper()} | {args.filter.upper()} | {cal_status}",
                  Theme.ACCENT_GREEN if cal_status == "CAL"
                  else Theme.ACCENT_ORANGE),
-                (f"Focus: {focused['class_name'] if focused else '--'}",
+                (f"Zone: {ZONE_PHRASES[zi]}",
+                 Theme.ACCENT_CYAN),
+                (f"Relation: {rel_txt}",
+                 Theme.ACCENT_GREEN if focused_rel else Theme.TEXT_DIM),
+                (f"Focus: {fname}",
                  Theme.ACCENT_GREEN if focused else Theme.TEXT_DIM),
-                (f"Gaze: ({dx}, {dy})", Theme.TEXT_DIM),
+                (f"Gaze: ({gx_scene}, {gy_scene})", Theme.TEXT_DIM),
             ])
-
-            # Face PIP (bottom-right)
-            pip_display.draw(canvas, pip_face, None)
 
             # Help hint
             if time.time() - help_t < 5:
@@ -730,6 +858,9 @@ def main():
                 cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
                 cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN,
                                       cv2.WINDOW_FULLSCREEN)
+                cv2.namedWindow(face_win, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow(face_win, 320, 240)
+                cv2.moveWindow(face_win, 50, 50)
 
             elif key == ord('f'):
                 fs = cv2.getWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN)
