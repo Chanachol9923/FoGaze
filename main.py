@@ -231,21 +231,21 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
 
     # ── Step-by-step instructions (EN + JP, black bg) ─────────────────
     guide_items = [
-        ("─── Calibration Guide ───────────────────", 24, (0, 255, 255)),
+        ("===== Calibration Guide =====", 24, (0, 255, 255)),
         ("", 0, None),
-        ("Step 1  —  Face detection", 22, (0, 230, 0)),
+        ("Step 1  -  Face detection", 22, (0, 230, 0)),
         ("  Position your face in front of the face camera", 18, (220, 220, 220)),
         ("  顔カメラの前に座って顔を映してください", 18, (160, 160, 160)),
         ("", 0, None),
-        ("Step 2  —  Look at the target & press ENTER", 22, (0, 230, 0)),
+        ("Step 2  -  Look at the target & press ENTER", 22, (0, 230, 0)),
         ("  Look at the circled point, then press ENTER to capture", 18, (220, 220, 220)),
         ("  丸いターゲットを見て、ENTERを押して撮影", 18, (160, 160, 160)),
         ("", 0, None),
-        ("Step 3  —  Rotate your head during capture", 22, (0, 230, 0)),
+        ("Step 3  -  Rotate your head during capture", 22, (0, 230, 0)),
         ("  Keep your eyes on the target, slowly rotate your head", 18, (220, 220, 220)),
         ("  ターゲットを見たままゆっくり頭を動かしてください", 18, (160, 160, 160)),
         ("", 0, None),
-        ("Step 4  —  Repeat for all 9 points", 22, (0, 230, 0)),
+        ("Step 4  -  Repeat for all 9 points", 22, (0, 230, 0)),
         ("  ENTER=capture  BACKSPACE=undo last point  ESC=finish", 18, (220, 220, 220)),
         ("  ENTER=撮影  BACKSPACE=戻る  ESC=終了", 18, (160, 160, 160)),
         ("", 0, None),
@@ -256,16 +256,20 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
         if not ret_s:
             continue
         canvas = np.zeros((h_s, w_s, 3), dtype=np.uint8)
-        pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-        draw = ImageDraw.Draw(pil_img)
         y = 50
         for txt, size, color in guide_items:
             if not txt:
                 y += 12
                 continue
-            draw.text((80, y), txt, font=_cjk_font(size), fill=color)
+            if any(ord(c) > 127 for c in txt):
+                pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+                draw = ImageDraw.Draw(pil_img)
+                draw.text((80, y), txt, font=_cjk_font(size), fill=color)
+                canvas[:] = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
+            else:
+                cv2.putText(canvas, txt, (80, y), font, size / 18,
+                            color, 2)
             y += size + 8
-        canvas[:] = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
         cv2.imshow(win, canvas)
         k = cv2.waitKey(1) & 0xFF
         if k == 13:
