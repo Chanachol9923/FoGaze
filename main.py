@@ -101,7 +101,7 @@ THING_THRESHOLD = 0.2  # below this → say "That Thing" instead of class
 
 def _zone_for(gx, gy, w, h):
     c1, c2 = int(w * 0.22), int(w * 0.78)
-    r1, r2 = int(h * 0.22), int(h * 0.78)
+    r1, r2 = int(h * 0.22), int(h * 0.95)
     col = 0 if gx < c1 else (1 if gx < c2 else 2)
     row = 0 if gy < r1 else (1 if gy < r2 else 2)
     return row * 3 + col, (c1, c2, r1, r2)
@@ -115,12 +115,13 @@ def _get_relation(a, b, w, h):
     inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
     aa = (x2a - x1a) * (y2a - y1a)
     ab = (x2b - x1b) * (y2b - y1b)
-    iou = inter / (aa + ab - inter) if (aa + ab - inter) > 0 else 0
-    if iou > 0.25:
+    union = aa + ab - inter
+    iou = inter / union if union > 0 else 0
+    if iou > 0.15:
         return "In"
     cx_a, cy_a = (x1a + x2a) / 2, (y1a + y2a) / 2
     cx_b, cy_b = (x1b + x2b) / 2, (y1b + y2b) / 2
-    m = min(w, h) * 0.02
+    m = min(w, h) * 0.04
     if abs(y2a - y1b) < m and x1b <= cx_a <= x2b:
         return "On"
     if abs(y1a - y2b) < m and x1b <= cx_a <= x2b:
@@ -129,8 +130,8 @@ def _get_relation(a, b, w, h):
         if abs(x2a - x1b) < m * 2 or abs(x2b - x1a) < m * 2:
             return "Next To"
     dist = ((cx_a - cx_b)**2 + (cy_a - cy_b)**2)**0.5
-    th = ((x2a - x1a + x2b - x1b) / 4 + (y2a - y1a + y2b - y1b) / 4) * 0.5
-    if dist < th * 1.5:
+    th = ((x2a - x1a + x2b - x1b) / 4 + (y2a - y1a + y2b - y1b) / 4) * 0.7
+    if dist < th:
         return "Near"
     if cy_a > cy_b + m and abs(cx_a - cx_b) < (x2a - x1a + x2b - x1b) / 2:
         return "Behind"
