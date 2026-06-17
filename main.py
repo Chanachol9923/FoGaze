@@ -33,6 +33,7 @@ from eyetrax.filters import (
 from eyetrax.utils.screen import get_screen_size
 
 from modules.object_detector import ObjectDetector
+from modules.depth_estimator import DepthEstimator
 from modules.ui import draw_text_stroke
 from modules.ui import Theme, TopBar, GazeCursor, HUDInfo
 
@@ -547,6 +548,12 @@ def main():
     )
     detector.set_detection_interval(args.detection_interval)
 
+    # ── Depth estimator ───────────────────────────────────────────────
+    depth_estimator = DepthEstimator(device="cuda")
+    show_depth = False
+    depth_frame_skip = 10
+    depth_frame_cnt = 0
+
     # ── UI components ─────────────────────────────────────────────────
     topbar = TopBar()
     cursor = GazeCursor()
@@ -565,6 +572,8 @@ def main():
     fps_n = 0
     fps_t0 = time.perf_counter()
     fps_val = 0
+
+    depth_map = None
 
     help_t = time.time()
     win_name = "FoGaze — Gaze + Object Tracking"
@@ -629,6 +638,14 @@ def main():
             # ── Object detection (scene camera) ───────────────────────
             detections = detector.detect(frame_scene)
 
+            # ── Depth estimation (every N frames) ──────────────────────
+            depth_frame_cnt += 1
+            if depth_frame_cnt >= depth_frame_skip:
+                depth_frame_cnt = 0
+                depth_map = depth_estimator.estimate(frame_scene)
+            focused_depth = None
+            focused_depth_cm = None
+
             focused = None
             if gaze_active:
                 for det in detections:
@@ -636,6 +653,11 @@ def main():
                     if x1 <= gx_scene <= x2 and y1 <= gy_scene <= y2:
                         focused = det
                         break
+            if focused:
+                x1, y1, x2, y2 = focused["bbox"]
+                focused_depth = depth_estimator.depth_at_bbox(x1, y1, x2, y2)
+                if focused_depth is not None:
+                    focused_depth_cm = depth_estimator.depth_to_distance_cm(focused_depth)
 
             # ── Relationship detection (all pairs) ────────────────────
             relations = {}  # (id_a, id_b) → rel
@@ -742,14 +764,16 @@ def main():
             draw_text_stroke(canvas, ZONE_PHRASES[zi],
                              (12, h_scene - 60), scale=0.5,
                              color=Theme.ACCENT_CYAN, thickness=1)
-            # Relationship text
+            # Relationship text + depth
             if focused and focused_rel:
                 fname = (focused['class_name'] if
                          focused['confidence'] >= THING_THRESHOLD
                          else "That Thing")
+                dist_txt = (f"(~{int(focused_depth_cm)}cm)"
+                            if focused_depth_cm is not None else "")
                 draw_text_stroke(
                     canvas,
-                    f"{fname} {focused_rel[0]} {focused_rel[1]['class_name']}",
+                    f"{fname} {focused_rel[0]} {focused_rel[1]['class_name']} {dist_txt}",
                     (12, h_scene - 36), scale=0.5,
                     color=Theme.ACCENT_GREEN, thickness=1)
 
@@ -779,6 +803,8 @@ def main():
             rel_txt = (f"{fname} {focused_rel[0]} "
                        f"{focused_rel[1]['class_name']}"
                        ) if focused_rel else "--"
+            depth_txt = (f"{int(focused_depth_cm)}cm"
+                         if focused_depth_cm is not None else "--")
             hud.draw(canvas, [
                 (f"Face cam:{face_cam}  Scene cam:{scene_cam}",
                  Theme.ACCENT_CYAN),
@@ -791,16 +817,35 @@ def main():
                  Theme.ACCENT_GREEN if focused_rel else Theme.TEXT_DIM),
                 (f"Focus: {fname}",
                  Theme.ACCENT_GREEN if focused else Theme.TEXT_DIM),
+                (f"Depth: {depth_txt}",
+                 Theme.ACCENT_CYAN if focused_depth_cm is not None else Theme.TEXT_DIM),
                 (f"Gaze: ({gx_scene}, {gy_scene})", Theme.TEXT_DIM),
             ])
 
             # Help hint
             if time.time() - help_t < 5:
                 draw_text_stroke(
-                    canvas, "ESC: quit  |  c: re-calibrate  |  f: fullscreen",
-                    (w_scene // 2 - 220, h_scene - 40),
+                    canvas,
+                    "ESC: quit  |  c: re-calibrate  |  f: fullscreen  |  d: depth",
+                    (w_scene // 2 - 250, h_scene - 40),
                     scale=0.45, color=Theme.TEXT_DIM,
                 )
+
+            # ── Depth overlay (small heatmap at top-right) ────────────
+            if show_depth and depth_map is not None:
+                dh = int(h_scene * 0.2)
+                dw = int(dh * 4 / 3)
+                depth_color = depth_estimator.colormap(depth_map)
+                depth_thumb = cv2.resize(depth_color, (dw, dh))
+                x_off = w_scene - dw - 10
+                y_off = 66
+                canvas[y_off:y_off+dh, x_off:x_off+dw] = depth_thumb
+                cv2.rectangle(canvas, (x_off, y_off),
+                              (x_off + dw, y_off + dh),
+                              (255, 255, 255), 1)
+                draw_text_stroke(canvas, "DEPTH",
+                                 (x_off + 4, y_off + 14),
+                                 scale=0.4, color=Theme.ACCENT_CYAN)
 
             # ── Display ───────────────────────────────────────────────
             if not args.headless:
@@ -873,6 +918,13 @@ def main():
                 cv2.setWindowProperty(
                     win_name, cv2.WND_PROP_FULLSCREEN,
                     cv2.WINDOW_FULLSCREEN if new_fs else cv2.WINDOW_NORMAL,
+                )
+
+            elif key == ord('d'):
+                show_depth = not show_depth
+                topbar.toast(
+                    f"Depth overlay {'ON' if show_depth else 'OFF'}",
+                    Theme.ACCENT_GREEN if show_depth else Theme.ACCENT_ORANGE,
                 )
 
     except KeyboardInterrupt:
