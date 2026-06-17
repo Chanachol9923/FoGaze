@@ -627,6 +627,10 @@ def main():
 
     args = parser.parse_args()
 
+    # ── Screen size ───────────────────────────────────────────────────
+    sw, sh = get_screen_size()
+    print(f"[FoGaze] Screen: {sw}x{sh}")
+
     # ── Camera selection via GUI ──────────────────────────────────────
     avail = _scan_cameras()
     cv2.destroyAllWindows()
@@ -691,10 +695,6 @@ def main():
         de = DepthEstimator(device="cuda")
         de.reset_cal()
         return
-
-    # ── Screen size ───────────────────────────────────────────────────
-    sw, sh = get_screen_size()
-    print(f"[FoGaze] Screen: {sw}x{sh}")
 
     # ── GazeEstimator ─────────────────────────────────────────────────
     print(f"[FoGaze] Creating GazeEstimator (model={args.model}) ...")
