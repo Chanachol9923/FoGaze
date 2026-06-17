@@ -551,8 +551,6 @@ def main():
     # ── Depth estimator ───────────────────────────────────────────────
     depth_estimator = DepthEstimator(device="cuda")
     show_depth = False
-    depth_frame_skip = 10
-    depth_frame_cnt = 0
 
     # ── UI components ─────────────────────────────────────────────────
     topbar = TopBar()
@@ -638,11 +636,8 @@ def main():
             # ── Object detection (scene camera) ───────────────────────
             detections = detector.detect(frame_scene)
 
-            # ── Depth estimation (every N frames) ──────────────────────
-            depth_frame_cnt += 1
-            if depth_frame_cnt >= depth_frame_skip:
-                depth_frame_cnt = 0
-                depth_map = depth_estimator.estimate(frame_scene)
+            # ── Depth estimation (async, non-blocking) ──────────────────
+            depth_map = depth_estimator.estimate(frame_scene)
             focused_depth = None
             focused_depth_cm = None
 
