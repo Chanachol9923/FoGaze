@@ -26,12 +26,12 @@ class DepthEstimator:
     MODEL_NAME = "depth-anything/Depth-Anything-V2-Small-hf"
 
     def __init__(self, device="cuda", depth_size: int = 224,
-                 frame_interval: int = 1):
+                 min_interval: float = 0.0):
         """depth_size: model input resolution (px). Smaller = faster but lower quality.
-        frame_interval: only run inference every N calls to estimate()."""
+        min_interval: minimum seconds between async inference submissions."""
         self._depth_size = depth_size
-        self._frame_interval = max(1, frame_interval)
-        self._frame_count = 0
+        self._min_interval = max(0.0, min_interval)
+        self._last_submit_time = 0.0
         # Check CUDA compatibility (GPU compute capability)
         cuda_ok = False
         if device == "cuda" and torch.cuda.is_available():
@@ -149,13 +149,14 @@ class DepthEstimator:
             return _time.time() - self._last_depth_time
 
     def estimate(self, image_bgr: np.ndarray) -> np.ndarray | None:
-        """Submit frame for async inference (skipped if not every N frames).
+        """Submit frame for async inference (throttled by min_interval).
         Returns the latest completed depth map (non-blocking)."""
         self._h, self._w = image_bgr.shape[:2]
-        self._frame_count += 1
-        if self._frame_count % self._frame_interval == 0:
+        now = _time.time()
+        if now - self._last_submit_time >= self._min_interval:
             with self._lock:
                 self._pending_frame = image_bgr
+            self._last_submit_time = now
         with self._lock:
             return self._last_depth
 

@@ -23,7 +23,6 @@ import cv2
 import glfw
 import imgui
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
 
 from eyetrax.gaze import GazeEstimator
 from eyetrax.filters import (
@@ -141,15 +140,6 @@ def _get_relation(a, b, w, h):
         return "Behind"
     return None
 
-_CJK_FONT_PATH = "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"
-_cjk_fonts = {}
-
-def _cjk_font(size):
-    if size not in _cjk_fonts:
-        _cjk_fonts[size] = ImageFont.truetype(_CJK_FONT_PATH, size)
-    return _cjk_fonts[size]
-
-
 DEFAULT_MODEL_PATH = os.path.expanduser("~/.cache/fogaze3/eyetrax_model.pkl")
 
 
@@ -170,120 +160,128 @@ def _scan_cameras(max_cam=10):
     return avail
 
 
-def _pick_camera(avail, label):
-    if not avail:
-        print(f"No {label} found.")
-        sys.exit(1)
-    if len(avail) == 1:
-        print(f"  {label}: camera {avail[0]}")
-        return avail[0]
-    while True:
-        try:
-            c = int(input(f"Select {label} {avail}: "))
-            if c in avail:
-                return c
-        except (ValueError, EOFError):
-            pass
+def _draw_main_menu(gui, fps_val=0, show_depth=False,
+                     zone_txt="--", focus_txt="--", depth_txt="--",
+                     cal_mode=None, cal_step=None, cal_progress=None):
+    """Left-side MainMenu panel. Returns action string or None."""
+    flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
+             imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
+             imgui.WINDOW_NO_SCROLLBAR)
+    imgui.set_next_window_position(0, 0)
+    imgui.set_next_window_size(250, gui.height)
+    imgui.begin("##MainMenu", None, flags)
+
+    imgui.text_colored("FoGaze", 0.3, 0.8, 1.0, 1.0)
+    imgui.separator()
+
+    if cal_mode is None:
+        imgui.text(f"FPS: {fps_val}")
+        imgui.separator()
+        if imgui.button("Re-calibrate Gaze", -1, 36):
+            return 'gaze_cal'
+        if imgui.button("Calibrate Depth", -1, 36):
+            return 'depth_cal'
+        s = show_depth
+        _, s = imgui.checkbox("Depth Overlay", s)
+        if s != show_depth:
+            return ('toggle_depth', s)
+        imgui.separator()
+        if imgui.button("Quit", -1, 36):
+            return 'quit'
+        imgui.separator()
+        imgui.text(f"Zone: {zone_txt}")
+        imgui.text(f"Focus: {focus_txt}")
+        imgui.text(f"Depth: {depth_txt}")
+    else:
+        imgui.text_colored("Calibrating", 0.2, 1.0, 0.5, 1.0)
+        if cal_step:
+            imgui.text(f"Step: {cal_step}")
+        if cal_progress:
+            imgui.text(cal_progress)
+        imgui.separator()
+        imgui.text_colored("ESC = Cancel", 0.8, 0.3, 0.3, 1.0)
+
+    imgui.end()
 
 
-def _wait_for_spacebar(sw, sh, message="Press SPACEBAR to start"):
-    cv2.destroyAllWindows()
-    win = "Ready"
-    cv2.namedWindow(win, cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    while True:
-        canvas = np.full((sh, sw, 3), Theme.BG_PRIMARY, dtype=np.uint8)
-        size, _ = cv2.getTextSize(message, font, 1.5, 3)
-        tx = (sw - size[0]) // 2
-        ty = (sh + size[1]) // 2
-        cv2.putText(canvas, message, (tx, ty), font, 1.5, Theme.ACCENT_GREEN, 3)
-        cv2.imshow(win, canvas)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 32:  # SPACEBAR
-            break
-        if key == 27:  # ESC
-            break
-    cv2.destroyWindow(win)
+def _draw_instructions(lines, gui_height):
+    """Bottom-left instruction panel."""
+    n = len(lines)
+    h = min(250, max(60, n * 22 + 30))
+    flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
+             imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
+             imgui.WINDOW_NO_SCROLLBAR)
+    imgui.set_next_window_position(0, gui_height - h)
+    imgui.set_next_window_size(250, h)
+    imgui.begin("##Instructions", None, flags)
+    for line in lines:
+        imgui.text_wrapped(line)
+    imgui.end()
 
 
-def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
+def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
                        capture_frames=250, grid_cols=3, grid_rows=3):
-    """Grid calibration: fixed circles on scene camera feed.
-
-    User looks at the real-world area each circle covers.
-    Auto-captures features during a short countdown per point.
-    ESC to cancel.
-    """
+    """Grid calibration rendered through GUIOverlay + ImGui panels."""
     ret, tmp = cap_scene.read()
     if not ret:
         print("[FoGaze] Cannot read scene camera for calibration.")
         return False
 
-    cv2.destroyAllWindows()
     h_s, w_s = tmp.shape[:2]
-    win = "Calibration"
-    cv2.namedWindow(win, cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    font = cv2.FONT_HERSHEY_SIMPLEX
-
-    # Grid of target points (10% margin)
     xs = np.linspace(int(w_s * 0.1), int(w_s * 0.9), grid_cols, dtype=int)
     ys = np.linspace(int(h_s * 0.1), int(h_s * 0.9), grid_rows, dtype=int)
     targets = [(int(x), int(y)) for y in ys for x in xs]
+    collected = []
 
-    collected = []  # list of [scene_x, scene_y, features]
-
-    # ── Step-by-step instructions (EN + JP, black bg) ─────────────────
     guide_items = [
-        ("===== Calibration Guide =====", 24, (0, 255, 255)),
-        ("", 0, None),
-        ("Step 1  -  Face detection", 22, (0, 230, 0)),
-        ("  Position your face in front of the face camera", 18, (220, 220, 220)),
-        ("  顔カメラの前に座って顔を映してください", 18, (160, 160, 160)),
-        ("", 0, None),
-        ("Step 2  -  Look at the target & press ENTER", 22, (0, 230, 0)),
-        ("  Look at the circled point, then press ENTER to capture", 18, (220, 220, 220)),
-        ("  丸いターゲットを見て、ENTERを押して撮影", 18, (160, 160, 160)),
-        ("", 0, None),
-        ("Step 3  -  Rotate your head during capture", 22, (0, 230, 0)),
-        ("  Keep your eyes on the target, slowly rotate your head", 18, (220, 220, 220)),
-        ("  ターゲットを見たままゆっくり頭を動かしてください", 18, (160, 160, 160)),
-        ("", 0, None),
-        ("Step 4  -  Repeat for all 9 points", 22, (0, 230, 0)),
-        ("  ENTER=capture  BACKSPACE=undo last point  ESC=finish", 18, (220, 220, 220)),
-        ("  ENTER=撮影  BACKSPACE=戻る  ESC=終了", 18, (160, 160, 160)),
-        ("", 0, None),
-        ("Press ENTER to start", 26, (0, 255, 255)),
+        "===== Calibration Guide =====",
+        "",
+        "Step 1 - Face detection",
+        "  Position your face in front of the face camera",
+        "  ɡāカメラの前に座って顔を映してください",
+        "",
+        "Step 2 - Look at the target & press ENTER",
+        "  Look at the circled point, then press ENTER to capture",
+        "  丸いターゲットを見て、ENTERを押して撮影",
+        "",
+        "Step 3 - Rotate your head during capture",
+        "  Keep eyes on target, slowly rotate your head",
+        "  ターゲットを見たままゆっくり頭を動かしてください",
+        "",
+        "Step 4 - Repeat for all 9 points",
+        "  ENTER=capture  BACKSPACE=undo  ESC=finish",
+        "  ENTER=撮影  BACKSPACE=戻る  ESC=終了",
+        "",
+        "Press ENTER to begin",
     ]
+
+    def _render_frame(canvas, face_disp, cal_step, cal_progress, instructions):
+        gui.update_scene_texture(canvas)
+        if face_disp is not None:
+            gui.update_face_texture(face_disp)
+        gui.begin_frame()
+        _draw_main_menu(gui, cal_mode='calibrating',
+                        cal_step=cal_step, cal_progress=cal_progress)
+        _draw_instructions(instructions, gui.height)
+        gui.render()
+        return kbd  # keys are handled by caller
+
+    # ── Phase 1: Guide screen ─────────────────────────────────────────
     while True:
         ret_s, frame_s = cap_scene.read()
         if not ret_s:
             continue
         canvas = np.zeros((h_s, w_s, 3), dtype=np.uint8)
-        y = 50
-        for txt, size, color in guide_items:
-            if not txt:
-                y += 12
-                continue
-            if any(ord(c) > 127 for c in txt):
-                pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-                draw = ImageDraw.Draw(pil_img)
-                draw.text((80, y), txt, font=_cjk_font(size), fill=color)
-                canvas[:] = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
-            else:
-                cv2.putText(canvas, txt, (80, y), font, size / 18,
-                            color, 2)
-            y += size + 8
-        cv2.imshow(win, canvas)
-        k = cv2.waitKey(1) & 0xFF
-        if k == 13:
+        for i, txt in enumerate(guide_items):
+            cv2.putText(canvas, txt, (80, 50 + i * 32),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        _render_frame(canvas, None, "Guide", "", guide_items)
+        if gui.was_key_pressed(glfw.KEY_ENTER):
             break
-        if k == 27:
-            cv2.destroyWindow(win)
+        if gui.was_key_pressed(glfw.KEY_ESCAPE):
             return False
 
-    # ── Wait for face once ────────────────────────────────────────────
+    # ── Phase 2: Wait for face ────────────────────────────────────────
     fd_start = None
     while True:
         ret_s, frame_s = cap_scene.read()
@@ -306,55 +304,56 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
                         0, -90, -90 + ang, Theme.ACCENT_GREEN, -1)
         else:
             fd_start = None
-            txt = "Face not detected"
-            size, _ = cv2.getTextSize(txt, font, 2, 3)
-            tx = (w_s - size[0]) // 2
-            ty = (h_s + size[1]) // 2
-            cv2.putText(canvas, txt, (tx, ty), font, 2, Theme.ACCENT_RED, 3)
+            cv2.putText(canvas, "Face not detected",
+                        (w_s // 2 - 150, h_s // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 2, Theme.ACCENT_RED, 3)
 
-        cv2.imshow(win, canvas)
-        if cv2.waitKey(1) == 27:
-            cv2.destroyWindow(win)
+        _render_frame(canvas, frame_face, "Face Detection",
+                      "Keep face in front of camera",
+                      ["Keep your face centered in the face camera",
+                       "顔をカメラの中央に保ってください",
+                       "",
+                       "Hold still for 2 seconds",
+                       "2秒間そのままの位置を保ってください"],
+                      {})
+        if gui.was_key_pressed(glfw.KEY_ESCAPE):
             return False
 
-    # ── Grid calibration loop (ENTER to capture each point) ──────────
+    # ── Phase 3: Grid capture ─────────────────────────────────────────
     for idx, (tx, ty) in enumerate(targets):
         while True:
             ret_s, frame_s = cap_scene.read()
             ret_f, frame_f = cap_face.read()
             if not ret_s or not ret_f:
                 continue
+            frame_face = cv2.flip(frame_f, 1)
             canvas = frame_s.copy()
 
-            # Target circle at this grid point
+            # Target at this grid point
             cv2.circle(canvas, (tx, ty), 30, Theme.ACCENT_CYAN, -1)
             cv2.circle(canvas, (tx, ty), 36, (255, 255, 255), 2)
             cv2.line(canvas, (tx - 20, ty), (tx + 20, ty), (255, 255, 255), 1)
             cv2.line(canvas, (tx, ty - 20), (tx, ty + 20), (255, 255, 255), 1)
 
-            # Previously captured points
             for pt in collected:
                 px, py = pt[0], pt[1]
                 cv2.circle(canvas, (px, py), 8, Theme.ACCENT_GREEN, -1)
                 cv2.circle(canvas, (px, py), 12, (255, 255, 255), 1)
 
-            # Info overlay
             n_captured = len(collected)
-            lines = [
-                f"Point {idx + 1} / {len(targets)}   |   Captured: {n_captured}",
-                "ENTER: capture this point  |  BACKSPACE: undo  |  ESC: done",
+            instructions = [
+                f"Point {idx + 1} / {len(targets)} | Captured: {n_captured}",
+                "",
+                "ENTER = capture this point    BACKSPACE = undo",
+                "ENTER = 撮影    BACKSPACE = 戻る",
             ]
-            for i, txt in enumerate(lines):
-                cv2.putText(canvas, txt, (50, 50 + i * 35),
-                            font, 0.8, (255, 255, 255), 2)
 
-            cv2.imshow(win, canvas)
-            key = cv2.waitKey(1) & 0xFF
+            _render_frame(canvas, frame_face, f"Point {idx+1}/{len(targets)}",
+                          f"Captured: {n_captured}", instructions)
+            if gui.was_key_pressed(glfw.KEY_ESCAPE):
+                return False
 
-            if key == 13:  # ENTER — capture
-                ret_f, frame_f = cap_face.read()
-                if not ret_f:
-                    continue
+            if gui.was_key_pressed(glfw.KEY_ENTER):
                 for _ in range(capture_frames):
                     ret_f2, frame_f2 = cap_face.read()
                     if not ret_f2:
@@ -363,125 +362,108 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
                         cv2.flip(frame_f2, 1))
                     if ft is not None and not blink:
                         collected.append([tx, ty, ft])
-                # Green flash + beep × 2
+                # Green flash + beep ×2
                 for _ in range(2):
                     ret_s2, fb = cap_scene.read()
                     if ret_s2:
                         fb2 = fb.copy()
-                        cv2.rectangle(fb2, (0, 0), (w_s, h_s),
-                                      (0, 230, 0), -1)
+                        cv2.rectangle(fb2, (0, 0), (w_s, h_s), (0, 230, 0), -1)
                         cv2.putText(fb2, "Done!", (w_s // 2 - 80, h_s // 2),
-                                    font, 2, (255, 255, 255), 3)
-                        cv2.imshow(win, fb2)
-                        cv2.waitKey(1)
-                    # Beep via multiple methods
+                                    cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+                        gui.update_scene_texture(fb2)
+                        gui.begin_frame()
+                        _draw_main_menu(gui, cal_mode='calibrating',
+                                        cal_step="Capturing...",
+                                        cal_progress="")
+                        gui.render()
                     print('\a', end='', flush=True)
                     os.system('echo -ne "\\a" > /dev/tty 2>/dev/null &')
-                    cv2.waitKey(200)
-                break  # move to next point
+                    time.sleep(0.2)
+                break
 
-            if key == 8:  # BACKSPACE — undo last point
+            if gui.was_key_pressed(glfw.KEY_BACKSPACE):
                 if collected:
                     removed = collected.pop()
                     print(f"[FoGaze] Removed point ({removed[0]}, {removed[1]})")
-
-            if key == 27:  # ESC — cancel
-                cv2.destroyWindow(win)
-                return False
-
-    cv2.destroyWindow(win)
 
     # ── Train ──────────────────────────────────────────────────────────
     if len(collected) < 3:
         print(f"[FoGaze] Too few samples ({len(collected)}), cannot calibrate.")
         return False
 
-    feats = np.array([c[2] for c in collected])  # (N, 348)
-    targs = np.array([[c[0], c[1]] for c in collected])  # (N, 2)
+    feats = np.array([c[2] for c in collected])
+    targs = np.array([[c[0], c[1]] for c in collected])
     print(f"[FoGaze] Training on {len(feats)} samples...")
     gaze_estimator.train(feats, targs)
     print("[FoGaze] Calibration complete.")
     return True
 
 
-def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
-    """Interactive depth calibration.
-
-    User places an object/hand at known distances; records DA2V norm values
-    and fits a linear model: cm = slope * norm + intercept.
-    """
-    win = "Depth Calibration"
-    cv2.namedWindow(win, cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
+def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
+                     cap_face=None):
+    """Interactive depth calibration rendered through GUIOverlay + ImGui."""
     distances = [30, 50, 100, 150, 200]
     samples = []  # (distance_cm, norm)
     font = cv2.FONT_HERSHEY_SIMPLEX
 
-    # Instruction screen
     guide = [
-        ("===== Depth Calibration =====", (0, 255, 255)),
-        ("", None),
-        ("Place your hand or an object at each distance shown.", (220, 220, 220)),
-        ("手や物体を表示された距離に置いてください。", (160, 160, 160)),
-        ("", None),
-        ("Press ENTER to capture each distance", (0, 230, 0)),
-        ("ENTERで各距離を撮影", (0, 230, 0)),
-        ("", None),
-        ("ESC to cancel", (220, 100, 100)),
-        ("ESC=キャンセル", (160, 80, 80)),
+        "===== Depth Calibration =====",
+        "",
+        "Place your hand or an object at each distance shown.",
+        "手や物体を表示された距離に置いてください。",
+        "",
+        "Press ENTER to capture each distance",
+        "ENTERで各距離を撮影",
+        "",
+        "ESC to cancel",
+        "ESC=キャンセル",
+        "",
+        "Press ENTER to begin",
     ]
+
+    def _render_frame(canvas, face_disp, cal_step, cal_progress, instructions):
+        gui.update_scene_texture(canvas)
+        if face_disp is not None:
+            gui.update_face_texture(face_disp)
+        gui.begin_frame()
+        _draw_main_menu(gui, cal_mode='calibrating',
+                        cal_step=cal_step, cal_progress=cal_progress)
+        _draw_instructions(instructions, gui.height)
+        gui.render()
+
+    # ── Phase 1: Guide screen ─────────────────────────────────────────
     while True:
         canvas = np.zeros((sh, sw, 3), dtype=np.uint8)
-        y = 50
-        for txt, color in guide:
-            if not txt:
-                y += 12
-                continue
-            if any(ord(c) > 127 for c in txt):
-                from PIL import Image, ImageDraw
-                pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-                draw = ImageDraw.Draw(pil_img)
-                draw.text((80, y), txt, font=_cjk_font(22))
-                canvas[:] = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
-            else:
-                cv2.putText(canvas, txt, (80, y), font, 1.0, color, 2)
-            y += 34
-        cv2.putText(canvas, "Press ENTER to begin",
-                    (80, y + 20), font, 1.2, (0, 255, 255), 2)
-        cv2.imshow(win, canvas)
-        k = cv2.waitKey(1) & 0xFF
-        if k == 13:
+        for i, txt in enumerate(guide):
+            cv2.putText(canvas, txt, (80, 50 + i * 34),
+                        font, 0.9, (200, 200, 200), 2)
+        _render_frame(canvas, None, "Guide", "", guide)
+        if gui.was_key_pressed(glfw.KEY_ENTER):
             break
-        if k == 27:
-            cv2.destroyWindow(win)
+        if gui.was_key_pressed(glfw.KEY_ESCAPE):
             return False
 
-    # Capture for each distance
+    # ── Phase 2: Capture each distance ────────────────────────────────
     for i, dist in enumerate(distances):
         while True:
             ret, frame = cap_scene.read()
             if not ret:
                 continue
             fh, fw = frame.shape[:2]
-
-            # Submit frame for async depth (non-blocking), get latest completed
             depth_map = depth_estimator.estimate(frame)
 
             canvas = frame.copy()
-            cv2.putText(canvas, f"Distance: {dist} cm   ({i + 1}/{len(distances)})",
+            cv2.putText(canvas, f"Distance: {dist} cm  ({i+1}/{len(distances)})",
                         (50, 50), font, 1.2, (0, 255, 255), 3)
             cv2.putText(canvas, "Place object/hand at this distance, then press ENTER",
                         (50, 100), font, 0.8, (220, 220, 220), 2)
-            cv2.putText(canvas, f"Press ENTER to capture  |  ESC to cancel",
-                        (50, 140), font, 0.7, (160, 160, 160), 2)
 
-            # Crosshair + center ROI indicator (relative to camera frame)
+            # Crosshair
             cx, cy = fw // 2, fh // 2
-            r = 25  # capture ROI radius
+            r = 25
             cv2.line(canvas, (0, cy), (fw, cy), (0, 255, 0), 1)
             cv2.line(canvas, (cx, 0), (cx, fh), (0, 255, 0), 1)
-            gap = 15; L = 30
+            gap, L = 15, 30
             for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
                 x0, y0 = cx + dx * gap, cy + dy * gap
                 cv2.line(canvas, (x0, y0), (x0 + dx * L, y0), (0, 255, 0), 2)
@@ -489,56 +471,59 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
             cv2.rectangle(canvas, (cx - r, cy - r), (cx + r, cy + r),
                           (0, 255, 0), 1)
             cv2.circle(canvas, (cx, cy), 3, (0, 255, 0), -1)
-            cv2.putText(canvas, "PLACE OBJECT HERE",
-                        (cx - 90, cy - 50),
-                        font, 0.6, (0, 255, 0), 2)
 
-            # ── Live depth preview (PIP bottom-right) ──────────────────
-            live_norm = None
+            # Depth PIP
             live_cm = None
-            depth_fresh = depth_estimator.depth_freshness
             if depth_map is not None:
                 depth_color = depth_estimator.colormap(depth_map)
                 pip_h, pip_w = fh // 4, fw // 4
                 depth_small = cv2.resize(depth_color, (pip_w, pip_h))
                 x_off, y_off = fw - pip_w - 10, fh - pip_h - 10
                 canvas[y_off:y_off + pip_h, x_off:x_off + pip_w] = depth_small
-                label = "DEPTH"
-                if depth_fresh > 2.0:
-                    label += " (old)"
-                    cv2.rectangle(canvas, (x_off, y_off),
-                                  (x_off + pip_w, y_off + pip_h),
-                                  (0, 0, 255), 2)
+                freshness = depth_estimator.depth_freshness
+                label = "DEPTH (old)" if freshness > 2.0 else "DEPTH"
                 cv2.putText(canvas, label, (x_off, y_off - 5),
-                            font, 0.5, (0, 0, 255) if depth_fresh > 2.0 else (0, 255, 0), 1)
-
-                # Live distance estimate at crosshair
+                            font, 0.5, (0, 0, 255) if freshness > 2.0 else (0, 255, 0), 1)
                 center_roi = depth_map[cy - r:cy + r, cx - r:cx + r]
                 if center_roi.size > 0:
-                    smin = float(depth_map.min())
-                    smax = float(depth_map.max())
+                    smin, smax = float(depth_map.min()), float(depth_map.max())
                     if smax > smin:
                         avg = float(center_roi.mean())
-                        live_norm = (avg - smin) / (smax - smin)
-                        live_norm = np.clip(live_norm, 0, 1)
-                        live_cm = depth_estimator.depth_to_distance_cm(
-                            avg, smin, smax)
+                        live_cm = depth_estimator.depth_to_distance_cm(avg, smin, smax)
                         cv2.putText(canvas, f"~{int(live_cm)}cm",
                                     (x_off, y_off + pip_h + 20),
                                     font, 0.6, (0, 255, 255), 2)
 
-            cv2.imshow(win, canvas)
-            k = cv2.waitKey(1) & 0xFF
-            if k == 13:
+            face_disp = None
+            if cap_face is not None:
+                ret_f, ff = cap_face.read()
+                if ret_f:
+                    face_disp = cv2.flip(ff, 1)
+
+            instructions = [
+                f"Distance: {dist} cm   ({i+1}/{len(distances)})",
+                "",
+                "Place hand/object at center crosshair",
+                "手や物体を中心に置いてください",
+                "",
+                "ENTER = capture    ESC = cancel",
+            ]
+
+            _render_frame(canvas, face_disp, f"Depth {dist}cm",
+                          f"Point {i+1}/{len(distances)}", instructions)
+
+            if gui.was_key_pressed(glfw.KEY_ESCAPE):
+                return False
+
+            if gui.was_key_pressed(glfw.KEY_ENTER):
                 ret, frame = cap_scene.read()
                 if not ret:
                     continue
-                # Use latest depth from background thread (non-blocking)
                 depth_map = depth_estimator.estimate(frame)
                 if depth_map is None:
                     print("[CalibrateDepth] Depth not ready, waiting...")
                     for _ in range(60):
-                        cv2.waitKey(40)
+                        time.sleep(0.04)
                         depth_map = depth_estimator.estimate(frame)
                         if depth_map is not None:
                             break
@@ -557,41 +542,34 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
                 samples.append((dist, norm))
                 print(f"[CalibrateDepth] {dist}cm -> norm={norm:.4f}")
 
-                # Short flash (also camera-frame coords)
+                # Green flash
                 fb = frame.copy()
                 cv2.rectangle(fb, (0, 0), (fw, fh), (0, 180, 0), -1)
-                label = f"{dist}cm captured!"
-                (tw, th), _ = cv2.getTextSize(label, font, 1.5, 3)
-                cv2.putText(fb, label,
-                            ((fw - tw) // 2, (fh + th) // 2),
+                cv2.putText(fb, f"{dist}cm captured!",
+                            ((fw - 250) // 2, (fh + 30) // 2),
                             font, 1.5, (255, 255, 255), 3)
-                cv2.imshow(win, fb)
-                cv2.waitKey(400)
+                gui.update_scene_texture(fb)
+                gui.begin_frame()
+                _draw_main_menu(gui, cal_mode='calibrating',
+                                cal_step="Saving...", cal_progress="")
+                gui.render()
+                time.sleep(0.4)
                 break
-
-            if k == 27:
-                cv2.destroyWindow(win)
-                return False
-
-    cv2.destroyWindow(win)
 
     if len(samples) < 3:
         print("[CalibrateDepth] Too few samples.")
         return False
 
-    # Fit linear regression: dist = slope * norm + intercept
+    # Fit linear regression
     norms = np.array([s[1] for s in samples])
     cm = np.array([s[0] for s in samples])
     A = np.vstack([norms, np.ones(len(norms))]).T
     slope, intercept = np.linalg.lstsq(A, cm, rcond=None)[0]
-
     print(f"[CalibrateDepth] Fit: cm = {slope:.3f} * norm + {intercept:.1f}")
     depth_estimator.save_cal(slope, intercept)
-
-    for dist, norm in samples:
-        pred = slope * norm + intercept
-        print(f"  {dist}cm -> norm={norm:.4f} -> pred={pred:.1f}cm (err={pred - dist:.1f})")
-
+    for d, n in samples:
+        pred = slope * n + intercept
+        print(f"  {d}cm -> norm={n:.4f} -> pred={pred:.1f}cm (err={pred - d:.1f})")
     return True
 
 
@@ -683,14 +661,12 @@ def main():
     scene_cam = avail[scene_cam_idx]
     print(f"[FoGaze] Face cam={face_cam}  Scene cam={scene_cam}")
 
-    gui.close()
-    cv2.destroyAllWindows()
-
-    # ── Model file ────────────────────────────────────────────────────
+    # gui stays open for calibration + main loop
     model_path = args.model_file or DEFAULT_MODEL_PATH
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
 
     if args.reset_model:
+        gui.close()
         if os.path.isfile(model_path):
             os.remove(model_path)
             print(f"[FoGaze] Deleted {model_path}")
@@ -699,6 +675,7 @@ def main():
         return
 
     if args.reset_depth_cal:
+        gui.close()
         de = DepthEstimator(device="cuda", depth_size=224)
         de.reset_cal()
         return
@@ -717,9 +694,7 @@ def main():
 
     if not _is_trained(gaze_estimator.model):
         print("[FoGaze] No valid model — starting calibration")
-        print("[FoGaze] Look at the circled area on scene camera. Then rotate head slowly at center.")
 
-        # Custom two-camera calibration: scene cam shows targets, face cam captures features
         cap_tmp_face = cv2.VideoCapture(face_cam)
         cap_tmp_scene = cv2.VideoCapture(scene_cam)
         if not cap_tmp_face.isOpened() or not cap_tmp_scene.isOpened():
@@ -730,13 +705,14 @@ def main():
         cap_tmp_scene.set(cv2.CAP_PROP_FRAME_HEIGHT, sh)
 
         ok = _calibrate_two_cam(
-            gaze_estimator, cap_tmp_face, cap_tmp_scene,
+            gaze_estimator, cap_tmp_face, cap_tmp_scene, gui,
         )
         cap_tmp_face.release()
         cap_tmp_scene.release()
 
         if not ok:
             print("[FoGaze] Calibration failed or was cancelled.")
+            gui.close()
             return
 
         try:
@@ -745,7 +721,28 @@ def main():
         except Exception as e:
             print(f"[FoGaze] Warning: could not save model ({e})")
 
-        _wait_for_spacebar(sw, sh, "Calibration done \u2014 press SPACEBAR to start")
+        # Done screen via gui
+        while True:
+            canvas = np.full((sh, sw, 3), Theme.BG_PRIMARY, dtype=np.uint8)
+            cv2.putText(canvas, "Calibration done - press ENTER to start",
+                        (sw // 2 - 300, sh // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, Theme.ACCENT_GREEN, 3)
+            gui.update_scene_texture(canvas)
+            gui.begin_frame()
+            _draw_main_menu(gui, cal_mode='calibrating',
+                            cal_step="Done", cal_progress="Press ENTER to start")
+            _draw_instructions(["Calibration complete!",
+                                "キャリブレーション完了！",
+                                "",
+                                "Press ENTER to continue",
+                                "ENTERで続行"],
+                               gui.height)
+            gui.render()
+            if gui.was_key_pressed(glfw.KEY_ENTER):
+                break
+            if gui.was_key_pressed(glfw.KEY_ESCAPE):
+                gui.close()
+                return
 
     # ── Filter (create before opening cameras) ────────────────────────────
     if args.filter == "kalman_ema":
@@ -787,7 +784,7 @@ def main():
 
     # ── Depth estimator ───────────────────────────────────────────────
     depth_estimator = DepthEstimator(device="cuda", depth_size=224,
-                                     frame_interval=10)
+                                     min_interval=0.5)
     show_depth = False
 
     # ── UI components ─────────────────────────────────────────────────
@@ -816,7 +813,7 @@ def main():
     # Clear any leftover windows
     cv2.destroyAllWindows()
 
-    gui = GUIOverlay(sw, sh)
+    # gui already open from camera selection
     _trigger_quit = False
     _trigger_recal = False
     _trigger_depth_cal = False
@@ -1080,28 +1077,22 @@ def main():
             # ── Display via GUIOverlay ──────────────────────────────────
             if not args.headless:
                 gui.update_scene_texture(canvas)
+                gui.update_face_texture(face_display)
                 gui.begin_frame()
 
-                # ── ImGui control panel ─────────────────────────────────
-                imgui.set_next_window_collapsed(True, imgui.ONCE)
-                imgui.begin("FoGaze Controls", None,
-                            imgui.WINDOW_ALWAYS_AUTO_RESIZE)
-                imgui.text(f"FPS: {fps_val}")
-                imgui.separator()
-                if imgui.button("Re-calibrate Gaze"):
-                    _trigger_recal = True
-                imgui.same_line()
-                if imgui.button("Calibrate Depth"):
-                    _trigger_depth_cal = True
-                imgui.separator()
-                _, show_depth = imgui.checkbox("Depth Overlay", show_depth)
-                imgui.separator()
-                if imgui.button("Quit"):
+                # ── MainMenu (left panel) ────────────────────────────────
+                action = _draw_main_menu(
+                    gui, fps_val, show_depth,
+                    ZONE_PHRASES[zi], fname, depth_txt,
+                )
+                if action == 'quit':
                     _trigger_quit = True
-                imgui.text(f"Zone: {ZONE_PHRASES[zi]}")
-                imgui.text(f"Focus: {fname}")
-                imgui.text(f"Depth: {depth_txt}")
-                imgui.end()
+                elif action == 'gaze_cal':
+                    _trigger_recal = True
+                elif action == 'depth_cal':
+                    _trigger_depth_cal = True
+                elif isinstance(action, tuple) and action[0] == 'toggle_depth':
+                    show_depth = action[1]
 
                 gui.render()
 
@@ -1112,7 +1103,6 @@ def main():
 
             if gui.was_key_pressed(glfw.KEY_C) or _trigger_recal:
                 print("[FoGaze] Re-calibrating gaze...")
-                gui.close()
                 cap_face.release()
                 cap_scene.release()
 
@@ -1128,13 +1118,11 @@ def main():
 
                 try:
                     ok = _calibrate_two_cam(
-                        gaze_estimator, cap_re_face, cap_re_scene,
+                        gaze_estimator, cap_re_face, cap_re_scene, gui,
                     )
                     if ok:
                         gaze_estimator.save_model(model_path)
                         print(f"[FoGaze] Model saved to {model_path}")
-                        _wait_for_spacebar(sw, sh,
-                                           "Re-calibration done - press SPACEBAR to resume")
                         cursor = GazeCursor()
                         cal_notified = False
                         topbar.toast("Re-calibrated!", Theme.ACCENT_GREEN)
@@ -1149,7 +1137,7 @@ def main():
                 cap_re_face.release()
                 cap_re_scene.release()
 
-                # Re-open cameras + GUI
+                # Re-open main cameras
                 cap_face = cv2.VideoCapture(face_cam)
                 cap_scene = cv2.VideoCapture(scene_cam)
                 if not cap_face.isOpened() or not cap_scene.isOpened():
@@ -1159,7 +1147,6 @@ def main():
                 cap_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap_scene.set(cv2.CAP_PROP_FRAME_WIDTH, sw)
                 cap_scene.set(cv2.CAP_PROP_FRAME_HEIGHT, sh)
-                gui = GUIOverlay(sw, sh)
 
             elif gui.was_key_pressed(glfw.KEY_D):
                 show_depth = not show_depth
@@ -1170,13 +1157,12 @@ def main():
 
             elif gui.was_key_pressed(glfw.KEY_P) or _trigger_depth_cal:
                 topbar.toast("Depth calibration...", Theme.ACCENT_CYAN)
-                gui.close()
-                ok = _calibrate_depth(depth_estimator, cap_scene, sw, sh)
+                ok = _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
+                                      cap_face=cap_face)
                 if ok:
                     topbar.toast("Depth calibrated!", Theme.ACCENT_GREEN)
                 else:
                     topbar.toast("Depth cal. cancelled", Theme.ACCENT_ORANGE)
-                gui = GUIOverlay(sw, sh)
 
             _trigger_quit = False
             _trigger_recal = False

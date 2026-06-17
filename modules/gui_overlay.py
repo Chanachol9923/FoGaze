@@ -161,10 +161,10 @@ class GUIOverlay:
             self._draw_texture_full(self._scene_tex,
                                     self._scene_tex_w, self._scene_tex_h)
 
-        # Face camera PIP (bottom-left)
+        # Face camera PIP (bottom-right, clear of left-panel instructions)
         if self._face_tex is not None:
             pw, ph = 320, 240
-            px, py = 10, self._height - ph - 10
+            px, py = self._width - pw - 10, self._height - ph - 10
             self._draw_texture_rect(self._face_tex, px, py, pw, ph)
             _draw_rect_outline(px, py, pw, ph, (1, 1, 1))
 
