@@ -25,9 +25,13 @@ DEPTH_CAL_PATH = Path.home() / ".cache" / "fogaze3" / "depth_cal.npz"
 class DepthEstimator:
     MODEL_NAME = "depth-anything/Depth-Anything-V2-Small-hf"
 
-    def __init__(self, device="cuda", depth_size: int = 224):
-        """depth_size: model input resolution (px). Smaller = faster but lower quality."""
+    def __init__(self, device="cuda", depth_size: int = 224,
+                 frame_interval: int = 1):
+        """depth_size: model input resolution (px). Smaller = faster but lower quality.
+        frame_interval: only run inference every N calls to estimate()."""
         self._depth_size = depth_size
+        self._frame_interval = max(1, frame_interval)
+        self._frame_count = 0
         # Check CUDA compatibility (GPU compute capability)
         cuda_ok = False
         if device == "cuda" and torch.cuda.is_available():
@@ -145,11 +149,14 @@ class DepthEstimator:
             return _time.time() - self._last_depth_time
 
     def estimate(self, image_bgr: np.ndarray) -> np.ndarray | None:
-        """Submit frame for async inference. Returns the latest completed depth map
-        (may be from a previous frame — non-blocking)."""
+        """Submit frame for async inference (skipped if not every N frames).
+        Returns the latest completed depth map (non-blocking)."""
         self._h, self._w = image_bgr.shape[:2]
+        self._frame_count += 1
+        if self._frame_count % self._frame_interval == 0:
+            with self._lock:
+                self._pending_frame = image_bgr
         with self._lock:
-            self._pending_frame = image_bgr
             return self._last_depth
 
     def depth_at_bbox(self, x1: int, y1: int, x2: int, y2: int) -> float | None:

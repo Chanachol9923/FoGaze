@@ -786,7 +786,8 @@ def main():
     detector.set_detection_interval(args.detection_interval)
 
     # ── Depth estimator ───────────────────────────────────────────────
-    depth_estimator = DepthEstimator(device="cuda", depth_size=224)
+    depth_estimator = DepthEstimator(device="cuda", depth_size=224,
+                                     frame_interval=10)
     show_depth = False
 
     # ── UI components ─────────────────────────────────────────────────
