@@ -460,6 +460,7 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
             ret, frame = cap_scene.read()
             if not ret:
                 continue
+            fh, fw = frame.shape[:2]  # camera frame size (NOT screen)
             canvas = frame.copy()
             cv2.putText(canvas, f"Distance: {dist} cm   ({i + 1}/{len(distances)})",
                         (50, 50), font, 1.2, (0, 255, 255), 3)
@@ -468,12 +469,12 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
             cv2.putText(canvas, f"Press ENTER to capture  |  ESC to cancel",
                         (50, 140), font, 0.7, (160, 160, 160), 2)
 
-            # Crosshair + center ROI indicator
-            cx, cy = sw // 2, sh // 2
+            # Crosshair + center ROI indicator (relative to camera frame)
+            cx, cy = fw // 2, fh // 2
             r = 25  # capture ROI radius
             # Thin cross lines (full width/height)
-            cv2.line(canvas, (0, cy), (sw, cy), (0, 255, 0), 1)
-            cv2.line(canvas, (cx, 0), (cx, sh), (0, 255, 0), 1)
+            cv2.line(canvas, (0, cy), (fw, cy), (0, 255, 0), 1)
+            cv2.line(canvas, (cx, 0), (cx, fh), (0, 255, 0), 1)
             # Corner brackets
             gap = 15
             L = 30
@@ -514,10 +515,13 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
                 samples.append((dist, norm))
                 print(f"[CalibrateDepth] {dist}cm -> norm={norm:.4f}")
 
-                # Short flash
+                # Short flash (also camera-frame coords)
                 fb = frame.copy()
-                cv2.rectangle(fb, (0, 0), (sw, sh), (0, 180, 0), -1)
-                cv2.putText(fb, f"{dist}cm captured!", (sw // 2 - 120, sh // 2),
+                cv2.rectangle(fb, (0, 0), (fw, fh), (0, 180, 0), -1)
+                label = f"{dist}cm captured!"
+                (tw, th), _ = cv2.getTextSize(label, font, 1.5, 3)
+                cv2.putText(fb, label,
+                            ((fw - tw) // 2, (fh + th) // 2),
                             font, 1.5, (255, 255, 255), 3)
                 cv2.imshow(win, fb)
                 cv2.waitKey(400)
