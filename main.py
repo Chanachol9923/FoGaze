@@ -468,13 +468,28 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
             cv2.putText(canvas, f"Press ENTER to capture  |  ESC to cancel",
                         (50, 140), font, 0.7, (160, 160, 160), 2)
 
-            # Center ROI indicator
+            # Crosshair + center ROI indicator
             cx, cy = sw // 2, sh // 2
-            r = 30
+            r = 25  # capture ROI radius
+            # Thin cross lines (full width/height)
+            cv2.line(canvas, (0, cy), (sw, cy), (0, 255, 0), 1)
+            cv2.line(canvas, (cx, 0), (cx, sh), (0, 255, 0), 1)
+            # Corner brackets
+            gap = 15
+            L = 30
+            for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
+                x0, y0 = cx + dx * gap, cy + dy * gap
+                cv2.line(canvas, (x0, y0), (x0 + dx * L, y0), (0, 255, 0), 2)
+                cv2.line(canvas, (x0, y0), (x0, y0 + dy * L), (0, 255, 0), 2)
+            # ROI box
             cv2.rectangle(canvas, (cx - r, cy - r), (cx + r, cy + r),
-                          (0, 255, 0), 2)
-            cv2.putText(canvas, "CENTER",
-                        (cx - 40, cy - 40), font, 0.6, (0, 255, 0), 2)
+                          (0, 255, 0), 1)
+            # Center dot
+            cv2.circle(canvas, (cx, cy), 3, (0, 255, 0), -1)
+            # Label
+            cv2.putText(canvas, "PLACE OBJECT HERE",
+                        (cx - 90, cy - 50),
+                        font, 0.6, (0, 255, 0), 2)
 
             cv2.imshow(win, canvas)
             k = cv2.waitKey(1) & 0xFF
