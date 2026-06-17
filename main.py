@@ -410,19 +410,24 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
 
 def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                      cap_face=None):
-    """Interactive depth calibration rendered through GUIOverlay + ImGui."""
-    distances = [30, 50, 100, 150, 200]
+    """Interactive depth calibration rendered through GUIOverlay + ImGui.
+    Uses a single 1m reference point: cm = (100 / norm_at_1m) * norm.
+    """
+    distances = [100]
     samples = []  # (distance_cm, norm)
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     guide = [
         "===== Depth Calibration =====",
         "",
-        "Place your hand or an object at each distance shown.",
-        "手や物体を表示された距離に置いてください。",
+        "Place your hand or object 1 meter (100cm) away.",
+        "手や物体を1メートル(100cm)の距離に置いてください。",
         "",
-        "Press ENTER to capture each distance",
-        "ENTERで各距離を撮影",
+        "Make sure the object is centered in the crosshair.",
+        "十字線の中央に物体が来るようにしてください。",
+        "",
+        "Press ENTER to capture",
+        "ENTERで撮影",
         "",
         "ESC to cancel",
         "ESC=キャンセル",
@@ -463,9 +468,9 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
             depth_map = depth_estimator.estimate(frame)
 
             canvas = frame.copy()
-            cv2.putText(canvas, f"Distance: {dist} cm  ({i+1}/{len(distances)})",
+            cv2.putText(canvas, "Depth Calibration  |  1 meter (100cm)",
                         (50, 50), font, 1.2, (0, 255, 255), 3)
-            cv2.putText(canvas, "Place object/hand at this distance, then press ENTER",
+            cv2.putText(canvas, "Place object/hand 1m away, centered in crosshair, then press ENTER",
                         (50, 100), font, 0.8, (220, 220, 220), 2)
 
             # Crosshair
@@ -512,16 +517,17 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                     face_disp = cv2.flip(ff, 1)
 
             instructions = [
-                f"Distance: {dist} cm   ({i+1}/{len(distances)})",
+                "Place hand/object 1 meter (100cm) away",
+                "手や物体を1m(100cm)の距離に置いてください",
                 "",
-                "Place hand/object at center crosshair",
-                "手や物体を中心に置いてください",
+                "Center it in the crosshair",
+                "十字線の中央に合わせてください",
                 "",
                 "ENTER = capture    ESC = cancel",
             ]
 
-            _render_frame(canvas, face_disp, f"Depth {dist}cm",
-                          f"Point {i+1}/{len(distances)}", instructions)
+            _render_frame(canvas, face_disp, f"Depth 100cm",
+                          "", instructions)
 
             if gui.was_key_pressed(glfw.KEY_ESCAPE):
                 return False
@@ -568,16 +574,18 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                 time.sleep(0.4)
                 break
 
-    if len(samples) < 3:
-        print("[CalibrateDepth] Too few samples.")
+    if len(samples) < 1:
+        print("[CalibrateDepth] No sample captured.")
         return False
 
-    # Fit linear regression
-    norms = np.array([s[1] for s in samples])
-    cm = np.array([s[0] for s in samples])
-    A = np.vstack([norms, np.ones(len(norms))]).T
-    slope, intercept = np.linalg.lstsq(A, cm, rcond=None)[0]
-    print(f"[CalibrateDepth] Fit: cm = {slope:.3f} * norm + {intercept:.1f}")
+    # Single-point calibration: cm = (100 / norm_at_1m) * norm
+    norm = samples[0][1]
+    if norm < 0.01:
+        print("[CalibrateDepth] Norm too close to zero, calibration failed.")
+        return False
+    slope = 100.0 / norm
+    intercept = 0.0
+    print(f"[CalibrateDepth] 1m norm={norm:.4f} -> cm = {slope:.3f} * norm")
     depth_estimator.save_cal(slope, intercept)
     for d, n in samples:
         pred = slope * n + intercept
