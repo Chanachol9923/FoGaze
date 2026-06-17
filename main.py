@@ -163,7 +163,7 @@ def _scan_cameras(max_cam=10):
 def _draw_main_menu(gui, fps_val=0, show_depth=False,
                      zone_txt="--", focus_txt="--", depth_txt="--",
                      cal_mode=None, cal_step=None, cal_progress=None,
-                     face_tex_id=None):
+                     face_tex_id=None, depth_tex_id=None):
     """Left-side MainMenu panel. Returns action string or None."""
     flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
              imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
@@ -208,6 +208,11 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
         imgui.separator()
         pw, ph = 230, 172  # 4:3 fits 250-wide panel
         imgui.image(face_tex_id, pw, ph, (0, 1), (1, 0))
+
+    # Depth colormap preview below face
+    if depth_tex_id is not None:
+        imgui.separator()
+        imgui.image(depth_tex_id, 230, 172, (0, 1), (1, 0))
 
     imgui.end()
     return action
@@ -271,7 +276,8 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
         gui.begin_frame()
         _draw_main_menu(gui, cal_mode='calibrating',
                         cal_step=cal_step, cal_progress=cal_progress,
-                        face_tex_id=gui.face_texture_id)
+                        face_tex_id=gui.face_texture_id,
+                        depth_tex_id=gui.depth_texture_id)
         _draw_instructions(instructions, gui.height)
         gui.render()
 
@@ -297,7 +303,7 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
         ret_f, frame_f = cap_face.read()
         if not ret_s or not ret_f:
             continue
-        frame_face = cv2.flip(frame_f, 1)
+        frame_face = cv2.flip(frame_f, -1)
         f, blink = gaze_estimator.extract_features(frame_face)
         face = f is not None and not blink
         canvas = frame_s.copy()
@@ -334,7 +340,7 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
             ret_f, frame_f = cap_face.read()
             if not ret_s or not ret_f:
                 continue
-            frame_face = cv2.flip(frame_f, 1)
+            frame_face = cv2.flip(frame_f, -1)
             canvas = frame_s.copy()
 
             # Target at this grid point
@@ -367,7 +373,7 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
                     if not ret_f2:
                         continue
                     ft, blink = gaze_estimator.extract_features(
-                        cv2.flip(frame_f2, 1))
+                        cv2.flip(frame_f2, -1))
                     if ft is not None and not blink:
                         collected.append([tx, ty, ft])
                 # Green flash + beep ×2
@@ -383,7 +389,8 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
                         _draw_main_menu(gui, cal_mode='calibrating',
                                         cal_step="Capturing...",
                                         cal_progress="",
-                                        face_tex_id=gui.face_texture_id)
+                                        face_tex_id=gui.face_texture_id,
+                                        depth_tex_id=gui.depth_texture_id)
                         gui.render()
                     print('\a', end='', flush=True)
                     os.system('echo -ne "\\a" > /dev/tty 2>/dev/null &')
@@ -442,7 +449,8 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
         gui.begin_frame()
         _draw_main_menu(gui, cal_mode='calibrating',
                         cal_step=cal_step, cal_progress=cal_progress,
-                        face_tex_id=gui.face_texture_id)
+                        face_tex_id=gui.face_texture_id,
+                        depth_tex_id=gui.depth_texture_id)
         _draw_instructions(instructions, gui.height)
         gui.render()
 
@@ -569,7 +577,8 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                 gui.begin_frame()
                 _draw_main_menu(gui, cal_mode='calibrating',
                                 cal_step="Saving...", cal_progress="",
-                                face_tex_id=gui.face_texture_id)
+                                face_tex_id=gui.face_texture_id,
+                                depth_tex_id=gui.depth_texture_id)
                 gui.render()
                 time.sleep(0.4)
                 break
@@ -751,7 +760,8 @@ def main():
             gui.begin_frame()
             _draw_main_menu(gui, cal_mode='calibrating',
                             cal_step="Done", cal_progress="Press ENTER to start",
-                            face_tex_id=gui.face_texture_id)
+                            face_tex_id=gui.face_texture_id,
+                            depth_tex_id=gui.depth_texture_id)
             _draw_instructions(["Calibration complete!",
                                 "キャリブレーション完了！",
                                 "",
@@ -847,7 +857,7 @@ def main():
             if not ret_face or not ret_scene:
                 break
 
-            frame_face = cv2.flip(frame_face, 1)
+            frame_face = cv2.flip(frame_face, -1)
             h_scene, w_scene = frame_scene.shape[:2]
 
             # FPS
@@ -987,16 +997,21 @@ def main():
                           Theme.BG_PRIMARY, -1)
             cv2.addWeighted(overlay, 0.12, canvas, 0.88, 0, canvas)
 
-            # YOLO bounding boxes
+            # YOLO bounding boxes with depth labels
             for det in detections:
                 x1, y1, x2, y2 = det["bbox"]
                 is_focused = (focused is not None and focused is det)
                 color = Theme.ACCENT_GREEN if is_focused else Theme.ACCENT_CYAN
                 thickness = 3 if is_focused else 2
                 cv2.rectangle(canvas, (x1, y1), (x2, y2), color, thickness)
+                # Depth distance for this detection
+                det_depth = depth_estimator.depth_at_bbox(x1, y1, x2, y2)
+                det_depth_cm = depth_estimator.depth_to_distance_cm(det_depth) if det_depth is not None else None
+                det_label = f"{det['class_name']} {det['confidence']:.2f}"
+                if det_depth_cm is not None:
+                    det_label += f"  {det_depth_cm/100:.1f}m"
                 draw_text_stroke(
-                    canvas,
-                    f"{det['class_name']} {det['confidence']:.2f}",
+                    canvas, det_label,
                     (x1, y1 - 8), scale=0.5, color=color,
                 )
 
@@ -1077,23 +1092,11 @@ def main():
                     scale=0.45, color=Theme.TEXT_DIM,
                 )
 
-            # ── Depth overlay (small heatmap at top-right) ────────────
-            if show_depth and depth_map is not None:
-                dh = int(h_scene * 0.2)
-                dw = int(dh * 4 / 3)
+            # ── Depth for MainMenu preview ────────────────────────────
+            if depth_map is not None:
                 depth_color = depth_estimator.colormap(depth_map)
-                depth_thumb = cv2.resize(depth_color, (dw, dh))
-                x_off = w_scene - dw - 10
-                y_off = 66
-                canvas[y_off:y_off+dh, x_off:x_off+dw] = depth_thumb
-                depth_fresh = depth_estimator.depth_freshness
-                if depth_fresh > 2.5:
-                    cv2.rectangle(canvas, (x_off, y_off),
-                                  (x_off + dw, y_off + dh),
-                                  Theme.ACCENT_RED, 2)
-                draw_text_stroke(canvas, f"DEPTH ({depth_fresh:.0f}s)",
-                                 (x_off + 4, y_off + 14),
-                                 scale=0.4, color=Theme.ACCENT_CYAN)
+                depth_thumb = cv2.resize(depth_color, (230, 172))
+                gui.update_depth_texture(depth_thumb)
 
             # ── Display via GUIOverlay ──────────────────────────────────
             if not args.headless:
@@ -1106,6 +1109,7 @@ def main():
                     gui, fps_val, show_depth,
                     ZONE_PHRASES[zi], fname, depth_txt,
                     face_tex_id=gui.face_texture_id,
+                    depth_tex_id=gui.depth_texture_id,
                 )
                 if action == 'quit':
                     _trigger_quit = True
