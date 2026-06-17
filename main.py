@@ -598,7 +598,6 @@ def main():
         return
 
     if args.reset_depth_cal:
-        from modules.depth_estimator import DepthEstimator
         de = DepthEstimator(device="cuda")
         de.reset_cal()
         return
