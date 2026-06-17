@@ -174,20 +174,21 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
     imgui.text_colored("FoGaze", 0.3, 0.8, 1.0, 1.0)
     imgui.separator()
 
+    action = None
     if cal_mode is None:
         imgui.text(f"FPS: {fps_val}")
         imgui.separator()
         if imgui.button("Re-calibrate Gaze", -1, 36):
-            return 'gaze_cal'
+            action = 'gaze_cal'
         if imgui.button("Calibrate Depth", -1, 36):
-            return 'depth_cal'
+            action = 'depth_cal'
         s = show_depth
         _, s = imgui.checkbox("Depth Overlay", s)
         if s != show_depth:
-            return ('toggle_depth', s)
+            action = ('toggle_depth', s)
         imgui.separator()
         if imgui.button("Quit", -1, 36):
-            return 'quit'
+            action = 'quit'
         imgui.separator()
         imgui.text(f"Zone: {zone_txt}")
         imgui.text(f"Focus: {focus_txt}")
@@ -202,6 +203,7 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
         imgui.text_colored("ESC = Cancel", 0.8, 0.3, 0.3, 1.0)
 
     imgui.end()
+    return action
 
 
 def _draw_instructions(lines, gui_height):
