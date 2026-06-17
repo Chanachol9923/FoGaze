@@ -315,8 +315,7 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
                        "顔をカメラの中央に保ってください",
                        "",
                        "Hold still for 2 seconds",
-                       "2秒間そのままの位置を保ってください"],
-                      {})
+                       "2秒間そのままの位置を保ってください"])
         if gui.was_key_pressed(glfw.KEY_ESCAPE):
             return False
 
