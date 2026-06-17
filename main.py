@@ -496,14 +496,21 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
             # ── Live depth preview (PIP bottom-right) ──────────────────
             live_norm = None
             live_cm = None
+            depth_fresh = depth_estimator.depth_freshness
             if depth_map is not None:
                 depth_color = depth_estimator.colormap(depth_map)
                 pip_h, pip_w = fh // 4, fw // 4
                 depth_small = cv2.resize(depth_color, (pip_w, pip_h))
                 x_off, y_off = fw - pip_w - 10, fh - pip_h - 10
                 canvas[y_off:y_off + pip_h, x_off:x_off + pip_w] = depth_small
-                cv2.putText(canvas, "DEPTH", (x_off, y_off - 5),
-                            font, 0.5, (0, 255, 0), 1)
+                label = "DEPTH"
+                if depth_fresh > 2.0:
+                    label += " (old)"
+                    cv2.rectangle(canvas, (x_off, y_off),
+                                  (x_off + pip_w, y_off + pip_h),
+                                  (0, 0, 255), 2)
+                cv2.putText(canvas, label, (x_off, y_off - 5),
+                            font, 0.5, (0, 0, 255) if depth_fresh > 2.0 else (0, 255, 0), 1)
 
                 # Live distance estimate at crosshair
                 center_roi = depth_map[cy - r:cy + r, cx - r:cx + r]
@@ -1060,10 +1067,12 @@ def main():
                 x_off = w_scene - dw - 10
                 y_off = 66
                 canvas[y_off:y_off+dh, x_off:x_off+dw] = depth_thumb
-                cv2.rectangle(canvas, (x_off, y_off),
-                              (x_off + dw, y_off + dh),
-                              (255, 255, 255), 1)
-                draw_text_stroke(canvas, "DEPTH",
+                depth_fresh = depth_estimator.depth_freshness
+                if depth_fresh > 2.5:
+                    cv2.rectangle(canvas, (x_off, y_off),
+                                  (x_off + dw, y_off + dh),
+                                  Theme.ACCENT_RED, 2)
+                draw_text_stroke(canvas, f"DEPTH ({depth_fresh:.0f}s)",
                                  (x_off + 4, y_off + 14),
                                  scale=0.4, color=Theme.ACCENT_CYAN)
 

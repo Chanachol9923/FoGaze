@@ -54,6 +54,7 @@ class DepthEstimator:
         self._lock = threading.Lock()
         self._pending_frame = None
         self._last_depth = None
+        self._last_depth_time = 0.0
         self._h, self._w = None, None
 
         # Calibration model: cm = slope * norm + intercept
@@ -99,6 +100,7 @@ class DepthEstimator:
                 depth = self._run_inference(frame)
                 with self._lock:
                     self._last_depth = depth
+                    self._last_depth_time = _time.time()
                     self._h, self._w = depth.shape[:2]
             else:
                 _time.sleep(0.005)
@@ -125,8 +127,17 @@ class DepthEstimator:
         depth = self._run_inference(image_bgr)
         with self._lock:
             self._last_depth = depth
+            self._last_depth_time = _time.time()
             self._h, self._w = depth.shape[:2]
         return depth
+
+    @property
+    def depth_freshness(self) -> float:
+        """Seconds since the last depth map was computed. Inf if never."""
+        with self._lock:
+            if self._last_depth_time == 0:
+                return float('inf')
+            return _time.time() - self._last_depth_time
 
     def estimate(self, image_bgr: np.ndarray) -> np.ndarray | None:
         """Submit frame for async inference. Returns the latest completed depth map
