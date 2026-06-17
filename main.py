@@ -266,7 +266,6 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
                         cal_step=cal_step, cal_progress=cal_progress)
         _draw_instructions(instructions, gui.height)
         gui.render()
-        return kbd  # keys are handled by caller
 
     # ── Phase 1: Guide screen ─────────────────────────────────────────
     while True:
