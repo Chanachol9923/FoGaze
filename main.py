@@ -1062,7 +1062,7 @@ def main():
                     Theme.ACCENT_GREEN if show_depth else Theme.ACCENT_ORANGE,
                 )
 
-            elif key == ord('C'):
+            elif key == ord('p'):
                 topbar.toast("Depth calibration...", Theme.ACCENT_CYAN)
                 cv2.destroyWindow(win_name)
                 cv2.destroyWindow(face_win)
