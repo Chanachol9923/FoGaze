@@ -20,6 +20,8 @@ import threading
 from pathlib import Path
 
 import cv2
+import glfw
+import imgui
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -34,6 +36,7 @@ from eyetrax.utils.screen import get_screen_size
 
 from modules.object_detector import ObjectDetector
 from modules.depth_estimator import DepthEstimator
+from modules.gui_overlay import GUIOverlay
 from modules.ui import draw_text_stroke
 from modules.ui import Theme, TopBar, GazeCursor, HUDInfo
 
@@ -624,17 +627,53 @@ def main():
 
     args = parser.parse_args()
 
-    # ── Camera selection ──────────────────────────────────────────────
+    # ── Camera selection via GUI ──────────────────────────────────────
     avail = _scan_cameras()
-    face_cam = (args.face_camera
-                if args.face_camera is not None
-                else _pick_camera(avail, "face camera"))
-    scene_cam = (args.scene_camera
-                 if args.scene_camera is not None
-                 else _pick_camera(
-                     [c for c in avail if c != face_cam] or avail,
-                     "scene camera"))
+    cv2.destroyAllWindows()
+    gui = GUIOverlay(sw, sh)
+
+    # Camera selection dialog
+    face_cam_idx = 0
+    scene_cam_idx = 1 if len(avail) > 1 else 0
+    cam_selected = False
+    while not cam_selected:
+        gui.begin_frame()
+        imgui.set_next_window_size(500, 300, imgui.ONCE)
+        imgui.set_next_window_position(gui.width//2 - 250, gui.height//2 - 150,
+                                        imgui.ONCE)
+        imgui.begin("Camera Selection", None,
+                    imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE)
+        imgui.text("Select Face Camera and Scene Camera")
+        imgui.separator()
+        imgui.text("")
+        camera_names = [f"Camera {i}" for i in avail]
+        _, face_cam_idx = imgui.combo("Face Camera", face_cam_idx, camera_names)
+        _, scene_cam_idx = imgui.combo("Scene Camera", scene_cam_idx, camera_names)
+        imgui.text("")
+        imgui.separator()
+        imgui.text(f"Selected: Face=Camera {avail[face_cam_idx]}, "
+                   f"Scene=Camera {avail[scene_cam_idx]}")
+        if imgui.button("Start", 200, 50):
+            if face_cam_idx != scene_cam_idx or len(avail) == 1:
+                cam_selected = True
+            else:
+                # Force different cameras if possible
+                if len(avail) > 1:
+                    # Swap scene to next available
+                    scene_cam_idx = (face_cam_idx + 1) % len(avail)
+        imgui.end()
+        gui.render()
+        if gui.was_key_pressed(glfw.KEY_ESCAPE):
+            gui.close()
+            print("[FoGaze] User cancelled camera selection.")
+            return
+
+    face_cam = avail[face_cam_idx]
+    scene_cam = avail[scene_cam_idx]
     print(f"[FoGaze] Face cam={face_cam}  Scene cam={scene_cam}")
+
+    gui.close()
+    cv2.destroyAllWindows()
 
     # ── Model file ────────────────────────────────────────────────────
     model_path = args.model_file or DEFAULT_MODEL_PATH
@@ -765,19 +804,14 @@ def main():
     depth_map = None
 
     help_t = time.time()
-    win_name = "FoGaze — Gaze + Object Tracking"
 
-    # Clear any leftover windows (tune, calibration, etc.)
+    # Clear any leftover windows
     cv2.destroyAllWindows()
 
-    cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN,
-                          cv2.WINDOW_FULLSCREEN)
-
-    face_win = "Face Camera"
-    cv2.namedWindow(face_win, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(face_win, 320, 240)
-    cv2.moveWindow(face_win, 50, 50)
+    gui = GUIOverlay(sw, sh)
+    _trigger_quit = False
+    _trigger_recal = False
+    _trigger_depth_cal = False
 
     try:
         while True:
@@ -916,7 +950,7 @@ def main():
                                           (fx2, fy2), Theme.ACCENT_GREEN, 2)
                 except Exception:
                     pass
-            cv2.imshow(face_win, face_display)
+            gui.update_face_texture(face_display)
 
             # ── Canvas (scene feed + overlays) ────────────────────────
             canvas = frame_scene.copy()
@@ -1033,18 +1067,42 @@ def main():
                                  (x_off + 4, y_off + 14),
                                  scale=0.4, color=Theme.ACCENT_CYAN)
 
-            # ── Display ───────────────────────────────────────────────
+            # ── Display via GUIOverlay ──────────────────────────────────
             if not args.headless:
-                cv2.imshow(win_name, canvas)
+                gui.update_scene_texture(canvas)
+                gui.begin_frame()
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:
+                # ── ImGui control panel ─────────────────────────────────
+                imgui.set_next_window_collapsed(True, imgui.ONCE)
+                imgui.begin("FoGaze Controls", None,
+                            imgui.WINDOW_ALWAYS_AUTO_RESIZE)
+                imgui.text(f"FPS: {fps_val}")
+                imgui.separator()
+                if imgui.button("Re-calibrate Gaze"):
+                    _trigger_recal = True
+                imgui.same_line()
+                if imgui.button("Calibrate Depth"):
+                    _trigger_depth_cal = True
+                imgui.separator()
+                _, show_depth = imgui.checkbox("Depth Overlay", show_depth)
+                imgui.separator()
+                if imgui.button("Quit"):
+                    _trigger_quit = True
+                imgui.text(f"Zone: {ZONE_PHRASES[zi]}")
+                imgui.text(f"Focus: {fname}")
+                imgui.text(f"Depth: {depth_txt}")
+                imgui.end()
+
+                gui.render()
+
+            # ── Key events (GLFW keys also processed via GUI) ──────────
+            if gui.was_key_pressed(glfw.KEY_ESCAPE) or _trigger_quit:
                 print("[FoGaze] User quit.")
                 break
 
-            elif key == ord('c'):
+            if gui.was_key_pressed(glfw.KEY_C) or _trigger_recal:
                 print("[FoGaze] Re-calibrating gaze...")
-                cv2.destroyAllWindows()
+                gui.close()
                 cap_face.release()
                 cap_scene.release()
 
@@ -1066,7 +1124,7 @@ def main():
                         gaze_estimator.save_model(model_path)
                         print(f"[FoGaze] Model saved to {model_path}")
                         _wait_for_spacebar(sw, sh,
-                                           "Re-calibration done \u2014 press SPACEBAR to resume")
+                                           "Re-calibration done - press SPACEBAR to resume")
                         cursor = GazeCursor()
                         cal_notified = False
                         topbar.toast("Re-calibrated!", Theme.ACCENT_GREEN)
@@ -1081,7 +1139,7 @@ def main():
                 cap_re_face.release()
                 cap_re_scene.release()
 
-                # Re-open main cameras
+                # Re-open cameras + GUI
                 cap_face = cv2.VideoCapture(face_cam)
                 cap_scene = cv2.VideoCapture(scene_cam)
                 if not cap_face.isOpened() or not cap_scene.isOpened():
@@ -1091,51 +1149,38 @@ def main():
                 cap_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap_scene.set(cv2.CAP_PROP_FRAME_WIDTH, sw)
                 cap_scene.set(cv2.CAP_PROP_FRAME_HEIGHT, sh)
-                cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-                cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN,
-                                      cv2.WINDOW_FULLSCREEN)
-                cv2.namedWindow(face_win, cv2.WINDOW_NORMAL)
-                cv2.resizeWindow(face_win, 320, 240)
-                cv2.moveWindow(face_win, 50, 50)
+                gui = GUIOverlay(sw, sh)
 
-            elif key == ord('f'):
-                fs = cv2.getWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN)
-                new_fs = not (fs == cv2.WINDOW_FULLSCREEN)
-                cv2.setWindowProperty(
-                    win_name, cv2.WND_PROP_FULLSCREEN,
-                    cv2.WINDOW_FULLSCREEN if new_fs else cv2.WINDOW_NORMAL,
-                )
-
-            elif key == ord('d'):
+            elif gui.was_key_pressed(glfw.KEY_D):
                 show_depth = not show_depth
                 topbar.toast(
                     f"Depth overlay {'ON' if show_depth else 'OFF'}",
                     Theme.ACCENT_GREEN if show_depth else Theme.ACCENT_ORANGE,
                 )
 
-            elif key == ord('p'):
+            elif gui.was_key_pressed(glfw.KEY_P) or _trigger_depth_cal:
                 topbar.toast("Depth calibration...", Theme.ACCENT_CYAN)
-                cv2.destroyWindow(win_name)
-                cv2.destroyWindow(face_win)
+                gui.close()
                 ok = _calibrate_depth(depth_estimator, cap_scene, sw, sh)
                 if ok:
                     topbar.toast("Depth calibrated!", Theme.ACCENT_GREEN)
                 else:
                     topbar.toast("Depth cal. cancelled", Theme.ACCENT_ORANGE)
-                # Re-create windows
-                cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-                cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN,
-                                      cv2.WINDOW_FULLSCREEN)
-                cv2.namedWindow(face_win, cv2.WINDOW_NORMAL)
-                cv2.resizeWindow(face_win, 320, 240)
-                cv2.moveWindow(face_win, 50, 50)
+                gui = GUIOverlay(sw, sh)
+
+            _trigger_quit = False
+            _trigger_recal = False
+            _trigger_depth_cal = False
 
     except KeyboardInterrupt:
         print("\n[FoGaze] Interrupted.")
     finally:
         cap_face.release()
         cap_scene.release()
-        cv2.destroyAllWindows()
+        if 'gui' in dir():
+            gui.close()
+        else:
+            cv2.destroyAllWindows()
         gaze_estimator.close()
         print("[FoGaze] Shutdown.")
 
