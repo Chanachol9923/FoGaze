@@ -25,25 +25,57 @@ class GUIOverlay:
             if gui.was_key_pressed(glfw.KEY_D): ...
     """
 
-    def __init__(self, width: int, height: int, title: str = "FoGaze"):
+    def __init__(self, width: int, height: int, title: str = "FoGaze",
+                 fullscreen: bool = False):
         glfw.init()
 
-        glfw.window_hint(glfw.FLOATING, glfw.FALSE)
-        glfw.window_hint(glfw.DECORATED, glfw.FALSE)
-        glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)
+        if fullscreen:
+            glfw.window_hint(glfw.FLOATING, glfw.FALSE)
+            glfw.window_hint(glfw.DECORATED, glfw.FALSE)
+            glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)
+            monitor = glfw.get_primary_monitor()
+            mode = glfw.get_video_mode(monitor)
+            win_w, win_h = mode.size.width, mode.size.height
+            self._window = glfw.create_window(win_w, win_h, title,
+                                              monitor, None)
+        else:
+            glfw.window_hint(glfw.DECORATED, glfw.TRUE)
+            glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
+            mon = glfw.get_primary_monitor()
+            mode = glfw.get_video_mode(mon)
+            max_w = int(mode.size.width * 0.85)
+            max_h = int(mode.size.height * 0.85)
+            win_w = min(width, max_w)
+            win_h = int(win_w * height / width)
+            if win_h > max_h:
+                win_h = max_h
+                win_w = int(win_h * width / height)
+            self._window = glfw.create_window(win_w, win_h, title,
+                                              None, None)
+            # Center on screen (may fail on Wayland — non-fatal)
+            try:
+                mon = glfw.get_primary_monitor()
+                mode = glfw.get_video_mode(mon)
+                glfw.set_window_pos(
+                    self._window,
+                    (mode.size.width - win_w) // 2,
+                    (mode.size.height - win_h) // 2,
+                )
+            except Exception:
+                pass
 
-        monitor = glfw.get_primary_monitor()
-        mode = glfw.get_video_mode(monitor)
-        self._window = glfw.create_window(mode.size.width, mode.size.height,
-                                          title, monitor, None)
         glfw.make_context_current(self._window)
-        glfw.swap_interval(1)  # VSync on
+        glfw.swap_interval(1)
+
+        self._content_w = width
+        self._content_h = height
 
         imgui.create_context()
         self._impl = GlfwRenderer(self._window)
 
-        self._width, self._height = mode.size.width, mode.size.height
+        self._width, self._height = win_w, win_h
         self._scene_tex = None
+        self._scene_tex_w = self._scene_tex_h = 0
         self._face_tex = None
 
         # ── Key event handling (chain before GlfwRenderer) ──────────
@@ -126,7 +158,8 @@ class GUIOverlay:
         gl.glLoadIdentity()
 
         if self._scene_tex is not None:
-            self._draw_texture_full(self._scene_tex)
+            self._draw_texture_full(self._scene_tex,
+                                    self._scene_tex_w, self._scene_tex_h)
 
         # Face camera PIP (bottom-left)
         if self._face_tex is not None:
@@ -144,6 +177,7 @@ class GUIOverlay:
 
     def update_scene_texture(self, bgr: np.ndarray):
         h, w = bgr.shape[:2]
+        self._scene_tex_w, self._scene_tex_h = w, h
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         data = np.ascontiguousarray(rgb)
 
@@ -185,19 +219,35 @@ class GUIOverlay:
 
     # ── Private helpers ────────────────────────────────────────────────
 
-    def _draw_texture_full(self, tex_id: int):
+    def _draw_texture_full(self, tex_id: int, tex_w: int = 0, tex_h: int = 0):
+        if tex_w == 0 or tex_h == 0:
+            tex_w, tex_h = self._content_w, self._content_h
+        tex_aspect = tex_w / tex_h
+        win_aspect = self._width / self._height
+        if tex_aspect > win_aspect:
+            # Window is taller — letterbox top/bottom
+            draw_w = self._width
+            draw_h = self._width / tex_aspect
+            ox = 0
+            oy = (self._height - draw_h) / 2
+        else:
+            # Window is wider — letterbox left/right
+            draw_h = self._height
+            draw_w = self._height * tex_aspect
+            ox = (self._width - draw_w) / 2
+            oy = 0
         gl.glEnable(gl.GL_TEXTURE_2D)
         gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)
         gl.glColor4f(1, 1, 1, 1)
         gl.glBegin(gl.GL_QUADS)
         gl.glTexCoord2f(0, 0)
-        gl.glVertex2f(0, 0)
+        gl.glVertex2f(ox, oy)
         gl.glTexCoord2f(1, 0)
-        gl.glVertex2f(self._width, 0)
+        gl.glVertex2f(ox + draw_w, oy)
         gl.glTexCoord2f(1, 1)
-        gl.glVertex2f(self._width, self._height)
+        gl.glVertex2f(ox + draw_w, oy + draw_h)
         gl.glTexCoord2f(0, 1)
-        gl.glVertex2f(0, self._height)
+        gl.glVertex2f(ox, oy + draw_h)
         gl.glEnd()
         gl.glDisable(gl.GL_TEXTURE_2D)
 
