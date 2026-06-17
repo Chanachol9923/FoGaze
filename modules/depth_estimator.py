@@ -25,7 +25,9 @@ DEPTH_CAL_PATH = Path.home() / ".cache" / "fogaze3" / "depth_cal.npz"
 class DepthEstimator:
     MODEL_NAME = "depth-anything/Depth-Anything-V2-Small-hf"
 
-    def __init__(self, device="cuda"):
+    def __init__(self, device="cuda", depth_size: int = 224):
+        """depth_size: model input resolution (px). Smaller = faster but lower quality."""
+        self._depth_size = depth_size
         # Check CUDA compatibility (GPU compute capability)
         cuda_ok = False
         if device == "cuda" and torch.cuda.is_available():
@@ -45,6 +47,9 @@ class DepthEstimator:
         print(f"[DepthEstimator] Using device: {self.device}")
 
         self.processor = AutoImageProcessor.from_pretrained(self.MODEL_NAME)
+        # Use smaller input for faster CPU inference
+        self.processor.size = {"height": self._depth_size, "width": self._depth_size}
+        print(f"[DepthEstimator] Processor input size: {self._depth_size}x{self._depth_size}")
         self.model = (
             AutoModelForDepthEstimation.from_pretrained(self.MODEL_NAME)
             .to(self.device)

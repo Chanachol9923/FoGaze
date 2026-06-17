@@ -699,7 +699,7 @@ def main():
         return
 
     if args.reset_depth_cal:
-        de = DepthEstimator(device="cuda")
+        de = DepthEstimator(device="cuda", depth_size=224)
         de.reset_cal()
         return
 
@@ -786,7 +786,7 @@ def main():
     detector.set_detection_interval(args.detection_interval)
 
     # ── Depth estimator ───────────────────────────────────────────────
-    depth_estimator = DepthEstimator(device="cuda")
+    depth_estimator = DepthEstimator(device="cuda", depth_size=224)
     show_depth = False
 
     # ── UI components ─────────────────────────────────────────────────
