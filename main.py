@@ -204,15 +204,15 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
         imgui.text_colored("ESC = Cancel", 0.8, 0.3, 0.3, 1.0)
 
     # Face camera preview at bottom of panel
+    pw, ph = 230, 172  # 4:3 fits 250-wide panel
     if face_tex_id is not None:
         imgui.separator()
-        pw, ph = 230, 172  # 4:3 fits 250-wide panel
         imgui.image(face_tex_id, pw, ph, (0, 1), (1, 0))
 
-    # Depth colormap preview below face
-    if depth_tex_id is not None:
+    # Depth colormap preview below face (only when toggled on)
+    if show_depth and depth_tex_id is not None:
         imgui.separator()
-        imgui.image(depth_tex_id, 230, 172, (0, 1), (1, 0))
+        imgui.image(depth_tex_id, pw, ph, (0, 1), (1, 0))
 
     imgui.end()
     return action
@@ -303,7 +303,7 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
         ret_f, frame_f = cap_face.read()
         if not ret_s or not ret_f:
             continue
-        frame_face = cv2.flip(frame_f, -1)
+        frame_face = cv2.flip(frame_f, 1)
         f, blink = gaze_estimator.extract_features(frame_face)
         face = f is not None and not blink
         canvas = frame_s.copy()
@@ -340,7 +340,7 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
             ret_f, frame_f = cap_face.read()
             if not ret_s or not ret_f:
                 continue
-            frame_face = cv2.flip(frame_f, -1)
+            frame_face = cv2.flip(frame_f, 1)
             canvas = frame_s.copy()
 
             # Target at this grid point
@@ -373,7 +373,7 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
                     if not ret_f2:
                         continue
                     ft, blink = gaze_estimator.extract_features(
-                        cv2.flip(frame_f2, -1))
+                        cv2.flip(frame_f2, 1))
                     if ft is not None and not blink:
                         collected.append([tx, ty, ft])
                 # Green flash + beep ×2
@@ -857,7 +857,7 @@ def main():
             if not ret_face or not ret_scene:
                 break
 
-            frame_face = cv2.flip(frame_face, -1)
+            frame_face = cv2.flip(frame_face, 1)
             h_scene, w_scene = frame_scene.shape[:2]
 
             # FPS
