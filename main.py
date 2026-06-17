@@ -401,6 +401,139 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene,
     return True
 
 
+def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
+    """Interactive depth calibration.
+
+    User places an object/hand at known distances; records DA2V norm values
+    and fits a linear model: cm = slope * norm + intercept.
+    """
+    win = "Depth Calibration"
+    cv2.namedWindow(win, cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+    distances = [30, 50, 100, 150, 200]
+    samples = []  # (distance_cm, norm)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    # Instruction screen
+    guide = [
+        ("===== Depth Calibration =====", (0, 255, 255)),
+        ("", None),
+        ("Place your hand or an object at each distance shown.", (220, 220, 220)),
+        ("手や物体を表示された距離に置いてください。", (160, 160, 160)),
+        ("", None),
+        ("Press ENTER to capture each distance", (0, 230, 0)),
+        ("ENTERで各距離を撮影", (0, 230, 0)),
+        ("", None),
+        ("ESC to cancel", (220, 100, 100)),
+        ("ESC=キャンセル", (160, 80, 80)),
+    ]
+    while True:
+        canvas = np.zeros((sh, sw, 3), dtype=np.uint8)
+        y = 50
+        for txt, color in guide:
+            if not txt:
+                y += 12
+                continue
+            if any(ord(c) > 127 for c in txt):
+                from PIL import Image, ImageDraw
+                pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+                draw = ImageDraw.Draw(pil_img)
+                draw.text((80, y), txt, font=_cjk_font(22))
+                canvas[:] = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
+            else:
+                cv2.putText(canvas, txt, (80, y), font, 1.0, color, 2)
+            y += 34
+        cv2.putText(canvas, "Press ENTER to begin",
+                    (80, y + 20), font, 1.2, (0, 255, 255), 2)
+        cv2.imshow(win, canvas)
+        k = cv2.waitKey(1) & 0xFF
+        if k == 13:
+            break
+        if k == 27:
+            cv2.destroyWindow(win)
+            return False
+
+    # Capture for each distance
+    for i, dist in enumerate(distances):
+        while True:
+            ret, frame = cap_scene.read()
+            if not ret:
+                continue
+            canvas = frame.copy()
+            cv2.putText(canvas, f"Distance: {dist} cm   ({i + 1}/{len(distances)})",
+                        (50, 50), font, 1.2, (0, 255, 255), 3)
+            cv2.putText(canvas, "Place object/hand at this distance, then press ENTER",
+                        (50, 100), font, 0.8, (220, 220, 220), 2)
+            cv2.putText(canvas, f"Press ENTER to capture  |  ESC to cancel",
+                        (50, 140), font, 0.7, (160, 160, 160), 2)
+
+            # Center ROI indicator
+            cx, cy = sw // 2, sh // 2
+            r = 30
+            cv2.rectangle(canvas, (cx - r, cy - r), (cx + r, cy + r),
+                          (0, 255, 0), 2)
+            cv2.putText(canvas, "CENTER",
+                        (cx - 40, cy - 40), font, 0.6, (0, 255, 0), 2)
+
+            cv2.imshow(win, canvas)
+            k = cv2.waitKey(1) & 0xFF
+            if k == 13:
+                ret, frame = cap_scene.read()
+                if not ret:
+                    continue
+                # Run depth synchronously
+                depth = depth_estimator.estimate_sync(frame)
+                if depth is None:
+                    continue
+                center_roi = depth[cy - r:cy + r, cx - r:cx + r]
+                if center_roi.size == 0:
+                    continue
+                scene_min = float(depth.min())
+                scene_max = float(depth.max())
+                if scene_max == scene_min:
+                    continue
+                avg_depth = float(center_roi.mean())
+                norm = (avg_depth - scene_min) / (scene_max - scene_min)
+                norm = np.clip(norm, 0, 1)
+                samples.append((dist, norm))
+                print(f"[CalibrateDepth] {dist}cm -> norm={norm:.4f}")
+
+                # Short flash
+                fb = frame.copy()
+                cv2.rectangle(fb, (0, 0), (sw, sh), (0, 180, 0), -1)
+                cv2.putText(fb, f"{dist}cm captured!", (sw // 2 - 120, sh // 2),
+                            font, 1.5, (255, 255, 255), 3)
+                cv2.imshow(win, fb)
+                cv2.waitKey(400)
+                break
+
+            if k == 27:
+                cv2.destroyWindow(win)
+                return False
+
+    cv2.destroyWindow(win)
+
+    if len(samples) < 3:
+        print("[CalibrateDepth] Too few samples.")
+        return False
+
+    # Fit linear regression: dist = slope * norm + intercept
+    norms = np.array([s[1] for s in samples])
+    cm = np.array([s[0] for s in samples])
+    A = np.vstack([norms, np.ones(len(norms))]).T
+    slope, intercept = np.linalg.lstsq(A, cm, rcond=None)[0]
+
+    print(f"[CalibrateDepth] Fit: cm = {slope:.3f} * norm + {intercept:.1f}")
+    depth_estimator.save_cal(slope, intercept)
+
+    for dist, norm in samples:
+        pred = slope * norm + intercept
+        print(f"  {dist}cm -> norm={norm:.4f} -> pred={pred:.1f}cm (err={pred - dist:.1f})")
+
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="FoGaze — two-camera gaze + object tracking"
@@ -433,6 +566,8 @@ def main():
                         help="YOLO inference every N frames")
     parser.add_argument("--imgsz", type=int, default=320,
                         help="YOLO inference size")
+    parser.add_argument("--reset-depth-cal", action="store_true",
+                        help="Delete depth calibration and exit")
     parser.add_argument("--headless", action="store_true",
                         help="Run without display")
 
@@ -460,6 +595,12 @@ def main():
             print(f"[FoGaze] Deleted {model_path}")
         else:
             print("[FoGaze] No model file found.")
+        return
+
+    if args.reset_depth_cal:
+        from modules.depth_estimator import DepthEstimator
+        de = DepthEstimator(device="cuda")
+        de.reset_cal()
         return
 
     # ── Screen size ───────────────────────────────────────────────────
@@ -921,6 +1062,23 @@ def main():
                     f"Depth overlay {'ON' if show_depth else 'OFF'}",
                     Theme.ACCENT_GREEN if show_depth else Theme.ACCENT_ORANGE,
                 )
+
+            elif key == ord('C'):
+                topbar.toast("Depth calibration...", Theme.ACCENT_CYAN)
+                cv2.destroyWindow(win_name)
+                cv2.destroyWindow(face_win)
+                ok = _calibrate_depth(depth_estimator, cap_scene, sw, sh)
+                if ok:
+                    topbar.toast("Depth calibrated!", Theme.ACCENT_GREEN)
+                else:
+                    topbar.toast("Depth cal. cancelled", Theme.ACCENT_ORANGE)
+                # Re-create windows
+                cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+                cv2.setWindowProperty(win_name, cv2.WND_PROP_FULLSCREEN,
+                                      cv2.WINDOW_FULLSCREEN)
+                cv2.namedWindow(face_win, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow(face_win, 320, 240)
+                cv2.moveWindow(face_win, 50, 50)
 
     except KeyboardInterrupt:
         print("\n[FoGaze] Interrupted.")
