@@ -460,7 +460,11 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
             ret, frame = cap_scene.read()
             if not ret:
                 continue
-            fh, fw = frame.shape[:2]  # camera frame size (NOT screen)
+            fh, fw = frame.shape[:2]
+
+            # Submit frame for async depth (non-blocking), get latest completed
+            depth_map = depth_estimator.estimate(frame)
+
             canvas = frame.copy()
             cv2.putText(canvas, f"Distance: {dist} cm   ({i + 1}/{len(distances)})",
                         (50, 50), font, 1.2, (0, 255, 255), 3)
@@ -472,25 +476,46 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
             # Crosshair + center ROI indicator (relative to camera frame)
             cx, cy = fw // 2, fh // 2
             r = 25  # capture ROI radius
-            # Thin cross lines (full width/height)
             cv2.line(canvas, (0, cy), (fw, cy), (0, 255, 0), 1)
             cv2.line(canvas, (cx, 0), (cx, fh), (0, 255, 0), 1)
-            # Corner brackets
-            gap = 15
-            L = 30
+            gap = 15; L = 30
             for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
                 x0, y0 = cx + dx * gap, cy + dy * gap
                 cv2.line(canvas, (x0, y0), (x0 + dx * L, y0), (0, 255, 0), 2)
                 cv2.line(canvas, (x0, y0), (x0, y0 + dy * L), (0, 255, 0), 2)
-            # ROI box
             cv2.rectangle(canvas, (cx - r, cy - r), (cx + r, cy + r),
                           (0, 255, 0), 1)
-            # Center dot
             cv2.circle(canvas, (cx, cy), 3, (0, 255, 0), -1)
-            # Label
             cv2.putText(canvas, "PLACE OBJECT HERE",
                         (cx - 90, cy - 50),
                         font, 0.6, (0, 255, 0), 2)
+
+            # ── Live depth preview (PIP bottom-right) ──────────────────
+            live_norm = None
+            live_cm = None
+            if depth_map is not None:
+                depth_color = depth_estimator.colormap(depth_map)
+                pip_h, pip_w = fh // 4, fw // 4
+                depth_small = cv2.resize(depth_color, (pip_w, pip_h))
+                x_off, y_off = fw - pip_w - 10, fh - pip_h - 10
+                canvas[y_off:y_off + pip_h, x_off:x_off + pip_w] = depth_small
+                cv2.putText(canvas, "DEPTH", (x_off, y_off - 5),
+                            font, 0.5, (0, 255, 0), 1)
+
+                # Live distance estimate at crosshair
+                center_roi = depth_map[cy - r:cy + r, cx - r:cx + r]
+                if center_roi.size > 0:
+                    smin = float(depth_map.min())
+                    smax = float(depth_map.max())
+                    if smax > smin:
+                        avg = float(center_roi.mean())
+                        live_norm = (avg - smin) / (smax - smin)
+                        live_norm = np.clip(live_norm, 0, 1)
+                        live_cm = depth_estimator.depth_to_distance_cm(
+                            avg, smin, smax)
+                        cv2.putText(canvas, f"~{int(live_cm)}cm",
+                                    (x_off, y_off + pip_h + 20),
+                                    font, 0.6, (0, 255, 255), 2)
 
             cv2.imshow(win, canvas)
             k = cv2.waitKey(1) & 0xFF
@@ -498,15 +523,22 @@ def _calibrate_depth(depth_estimator, cap_scene, sw, sh):
                 ret, frame = cap_scene.read()
                 if not ret:
                     continue
-                # Run depth synchronously
-                depth = depth_estimator.estimate_sync(frame)
-                if depth is None:
+                # Use latest depth from background thread (non-blocking)
+                depth_map = depth_estimator.estimate(frame)
+                if depth_map is None:
+                    print("[CalibrateDepth] Depth not ready, waiting...")
+                    for _ in range(60):
+                        cv2.waitKey(40)
+                        depth_map = depth_estimator.estimate(frame)
+                        if depth_map is not None:
+                            break
+                if depth_map is None:
                     continue
-                center_roi = depth[cy - r:cy + r, cx - r:cx + r]
+                center_roi = depth_map[cy - r:cy + r, cx - r:cx + r]
                 if center_roi.size == 0:
                     continue
-                scene_min = float(depth.min())
-                scene_max = float(depth.max())
+                scene_min = float(depth_map.min())
+                scene_max = float(depth_map.max())
                 if scene_max == scene_min:
                     continue
                 avg_depth = float(center_roi.mean())
