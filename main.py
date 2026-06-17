@@ -162,7 +162,8 @@ def _scan_cameras(max_cam=10):
 
 def _draw_main_menu(gui, fps_val=0, show_depth=False,
                      zone_txt="--", focus_txt="--", depth_txt="--",
-                     cal_mode=None, cal_step=None, cal_progress=None):
+                     cal_mode=None, cal_step=None, cal_progress=None,
+                     face_tex_id=None):
     """Left-side MainMenu panel. Returns action string or None."""
     flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
              imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
@@ -201,6 +202,12 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
             imgui.text(cal_progress)
         imgui.separator()
         imgui.text_colored("ESC = Cancel", 0.8, 0.3, 0.3, 1.0)
+
+    # Face camera preview at bottom of panel
+    if face_tex_id is not None:
+        imgui.separator()
+        pw, ph = 230, 172  # 4:3 fits 250-wide panel
+        imgui.image(face_tex_id, pw, ph, (0, 1), (1, 0))
 
     imgui.end()
     return action
@@ -263,7 +270,8 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
             gui.update_face_texture(face_disp)
         gui.begin_frame()
         _draw_main_menu(gui, cal_mode='calibrating',
-                        cal_step=cal_step, cal_progress=cal_progress)
+                        cal_step=cal_step, cal_progress=cal_progress,
+                        face_tex_id=gui.face_texture_id)
         _draw_instructions(instructions, gui.height)
         gui.render()
 
@@ -374,7 +382,8 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
                         gui.begin_frame()
                         _draw_main_menu(gui, cal_mode='calibrating',
                                         cal_step="Capturing...",
-                                        cal_progress="")
+                                        cal_progress="",
+                                        face_tex_id=gui.face_texture_id)
                         gui.render()
                     print('\a', end='', flush=True)
                     os.system('echo -ne "\\a" > /dev/tty 2>/dev/null &')
@@ -427,7 +436,8 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
             gui.update_face_texture(face_disp)
         gui.begin_frame()
         _draw_main_menu(gui, cal_mode='calibrating',
-                        cal_step=cal_step, cal_progress=cal_progress)
+                        cal_step=cal_step, cal_progress=cal_progress,
+                        face_tex_id=gui.face_texture_id)
         _draw_instructions(instructions, gui.height)
         gui.render()
 
@@ -460,7 +470,8 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
 
             # Crosshair
             cx, cy = fw // 2, fh // 2
-            r = 25
+            r = 25  # visual crosshair radius
+            sample_r = 50  # larger ROI for more stable depth sampling
             cv2.line(canvas, (0, cy), (fw, cy), (0, 255, 0), 1)
             cv2.line(canvas, (cx, 0), (cx, fh), (0, 255, 0), 1)
             gap, L = 15, 30
@@ -484,7 +495,7 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                 label = "DEPTH (old)" if freshness > 2.0 else "DEPTH"
                 cv2.putText(canvas, label, (x_off, y_off - 5),
                             font, 0.5, (0, 0, 255) if freshness > 2.0 else (0, 255, 0), 1)
-                center_roi = depth_map[cy - r:cy + r, cx - r:cx + r]
+                center_roi = depth_map[cy - sample_r:cy + sample_r, cx - sample_r:cx + sample_r]
                 if center_roi.size > 0:
                     smin, smax = float(depth_map.min()), float(depth_map.max())
                     if smax > smin:
@@ -529,14 +540,14 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                             break
                 if depth_map is None:
                     continue
-                center_roi = depth_map[cy - r:cy + r, cx - r:cx + r]
+                center_roi = depth_map[cy - sample_r:cy + sample_r, cx - sample_r:cx + sample_r]
                 if center_roi.size == 0:
                     continue
                 scene_min = float(depth_map.min())
                 scene_max = float(depth_map.max())
                 if scene_max == scene_min:
                     continue
-                avg_depth = float(center_roi.mean())
+                avg_depth = float(np.median(center_roi))
                 norm = (avg_depth - scene_min) / (scene_max - scene_min)
                 norm = np.clip(norm, 0, 1)
                 samples.append((dist, norm))
@@ -551,7 +562,8 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                 gui.update_scene_texture(fb)
                 gui.begin_frame()
                 _draw_main_menu(gui, cal_mode='calibrating',
-                                cal_step="Saving...", cal_progress="")
+                                cal_step="Saving...", cal_progress="",
+                                face_tex_id=gui.face_texture_id)
                 gui.render()
                 time.sleep(0.4)
                 break
@@ -730,7 +742,8 @@ def main():
             gui.update_scene_texture(canvas)
             gui.begin_frame()
             _draw_main_menu(gui, cal_mode='calibrating',
-                            cal_step="Done", cal_progress="Press ENTER to start")
+                            cal_step="Done", cal_progress="Press ENTER to start",
+                            face_tex_id=gui.face_texture_id)
             _draw_instructions(["Calibration complete!",
                                 "キャリブレーション完了！",
                                 "",
@@ -1084,6 +1097,7 @@ def main():
                 action = _draw_main_menu(
                     gui, fps_val, show_depth,
                     ZONE_PHRASES[zi], fname, depth_txt,
+                    face_tex_id=gui.face_texture_id,
                 )
                 if action == 'quit':
                     _trigger_quit = True

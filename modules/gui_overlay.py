@@ -108,6 +108,11 @@ class GUIOverlay:
     def window(self):
         return self._window
 
+    @property
+    def face_texture_id(self):
+        """OpenGL texture ID for the face camera, or None."""
+        return self._face_tex
+
     # ── Key / event API ────────────────────────────────────────────────
 
     def was_key_pressed(self, glfw_key: int) -> bool:
@@ -161,12 +166,8 @@ class GUIOverlay:
             self._draw_texture_full(self._scene_tex,
                                     self._scene_tex_w, self._scene_tex_h)
 
-        # Face camera PIP (bottom-right, clear of left-panel instructions)
-        if self._face_tex is not None:
-            pw, ph = 320, 240
-            px, py = self._width - pw - 10, self._height - ph - 10
-            self._draw_texture_rect(self._face_tex, px, py, pw, ph)
-            _draw_rect_outline(px, py, pw, ph, (1, 1, 1))
+        # Face camera is rendered via imgui.image() inside the MainMenu panel.
+        # No OpenGL-based face PIP here.
 
         # ImGui overlay
         imgui.render()
@@ -267,15 +268,3 @@ class GUIOverlay:
         gl.glVertex2f(x, y + h)
         gl.glEnd()
         gl.glDisable(gl.GL_TEXTURE_2D)
-
-
-def _draw_rect_outline(x: int, y: int, w: int, h: int,
-                       color: tuple[float, float, float]):
-    gl.glDisable(gl.GL_TEXTURE_2D)
-    gl.glColor4f(*color, 1)
-    gl.glBegin(gl.GL_LINE_LOOP)
-    gl.glVertex2f(x, y)
-    gl.glVertex2f(x + w, y)
-    gl.glVertex2f(x + w, y + h)
-    gl.glVertex2f(x, y + h)
-    gl.glEnd()
