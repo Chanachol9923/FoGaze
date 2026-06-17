@@ -207,12 +207,12 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
     pw, ph = 230, 172  # 4:3 fits 250-wide panel
     if face_tex_id is not None:
         imgui.separator()
-        imgui.image(face_tex_id, pw, ph, (0, 1), (1, 0))
+        imgui.image(face_tex_id, pw, ph)
 
     # Depth colormap preview below face (only when toggled on)
     if show_depth and depth_tex_id is not None:
         imgui.separator()
-        imgui.image(depth_tex_id, pw, ph, (0, 1), (1, 0))
+        imgui.image(depth_tex_id, pw, ph)
 
     imgui.end()
     return action
