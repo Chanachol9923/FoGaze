@@ -56,8 +56,8 @@ class CameraCalibrator:
         return self.mtx is not None and self.dist is not None
 
     def _ensure_maps(self, w: int, h: int):
-        if not self.ready:
-            return
+        if self.mtx is None or self.dist is None:
+            self._init_default(w, h)
         if w == self._map_w and h == self._map_h and self.map1 is not None:
             return
         self.map1, self.map2 = cv2.initUndistortRectifyMap(
@@ -65,9 +65,27 @@ class CameraCalibrator:
         )
         self._map_w, self._map_h = w, h
 
+    def _init_default(self, w: int, h: int):
+        """Internal: set reasonable default for a typical ~75° FOV webcam."""
+        f = max(w, h) * 1.0
+        self.mtx = np.array([
+            [f, 0, w / 2],
+            [0, f, h / 2],
+            [0, 0, 1],
+        ], dtype=np.float64)
+        self.dist = np.array([-0.30, 0.10, 0, 0], dtype=np.float64)
+        self._map_w, self._map_h = w, h
+        self.map1, self.map2 = cv2.initUndistortRectifyMap(
+            self.mtx, self.dist, None, self.mtx, (w, h), cv2.CV_32FC1
+        )
+        print(f"[CameraCalibrator] Default undistort for {w}x{h} — k1={self.dist[0]:.2f} k2={self.dist[1]:.2f}")
+
+    def enable_default(self, w: int, h: int):
+        """Public: re-initialize with default parameters (overrides chessboard cal)."""
+        self._init_default(w, h)
+        self.save()
+
     def undistort(self, frame: np.ndarray) -> np.ndarray:
-        if not self.ready:
-            return frame
         h, w = frame.shape[:2]
         self._ensure_maps(w, h)
         return cv2.remap(frame, self.map1, self.map2, cv2.INTER_LINEAR)

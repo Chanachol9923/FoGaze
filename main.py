@@ -1079,11 +1079,9 @@ def main():
 
             frame_face = cv2.flip(frame_face, 1)
 
-            # Undistort both feeds if calibration available
-            if calib_face.ready:
-                frame_face = calib_face.undistort(frame_face)
-            if calib_scene.ready:
-                frame_scene = calib_scene.undistort(frame_scene)
+            # Undistort both feeds (auto-defaults if no chessboard cal)
+            frame_face = calib_face.undistort(frame_face)
+            frame_scene = calib_scene.undistort(frame_scene)
 
             h_scene, w_scene = frame_scene.shape[:2]
 
