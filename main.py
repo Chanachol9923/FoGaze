@@ -38,6 +38,7 @@ from modules.depth_estimator import DepthEstimator
 from modules.gui_overlay import GUIOverlay
 from modules.ui import draw_text_stroke
 from modules.ui import Theme, TopBar, GazeCursor, HUDInfo
+from modules.camera_calibrator import CameraCalibrator
 
 
 class DoubleBlinkDetector:
@@ -184,6 +185,8 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
             action = 'gaze_cal'
         if imgui.button("Calibrate Depth", -1, 36):
             action = 'depth_cal'
+        if imgui.button("Calibrate Cameras", -1, 36):
+            action = 'cam_cal'
         s = show_depth
         _, s = imgui.checkbox("Depth Overlay", s)
         if s != show_depth:
@@ -597,6 +600,129 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
     return True
 
 
+def _calibrate_cameras(calib_face: CameraCalibrator,
+                       calib_scene: CameraCalibrator,
+                       cap_face, cap_scene, gui):
+    """Interactive camera calibration using chessboard pattern.
+
+    The user points a printed chessboard (9x6 internal corners) at
+    each camera from various angles and presses ENTER to capture.
+    10+ good samples per camera are needed.
+    """
+    import cv2 as _cv2
+    font = _cv2.FONT_HERSHEY_SIMPLEX
+
+    for cam_name, cap, calib in [
+        ("FACE CAMERA", cap_face, calib_face),
+        ("SCENE CAMERA", cap_scene, calib_scene),
+    ]:
+        frames = []
+        print(f"[CalibrateCameras] === {cam_name} ===")
+        for _ in range(30):
+            cap.read()
+        guide = [
+            f"Calibrating {cam_name}",
+            "",
+            "Show a printed chessboard (9x6 internal corners)",
+            "(9x6 のチェスボードをカメラに映してください)",
+            "",
+            "Move it at different angles and positions",
+            "角度や位置を変えてください",
+            "",
+            f"Samples: 0/10  (need >= 10)",
+            "",
+            "ENTER = capture    ESC = skip camera",
+        ]
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            frame = _cv2.flip(frame, 1) if cam_name == "FACE CAMERA" else frame
+            gray = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
+            ret_cb, corners = _cv2.findChessboardCorners(
+                gray, CameraCalibrator.CHESSBOARD, None
+            )
+
+            display = frame.copy()
+            if ret_cb:
+                _cv2.drawChessboardCorners(display,
+                                           CameraCalibrator.CHESSBOARD,
+                                           corners, ret_cb)
+
+            h, w = frame.shape[:2]
+            _cv2.putText(display, f"Samples: {len(frames)}/10",
+                         (30, h - 30), font, 0.8,
+                         (0, 255, 0) if len(frames) >= 10 else (0, 255, 255), 2)
+
+            face_disp = None
+            if cam_name == "SCENE CAMERA" and cap_face is not None:
+                rf, ff = cap_face.read()
+                if rf:
+                    face_disp = _cv2.flip(ff, 1)
+
+            guide[6] = f"Samples: {len(frames)}/10  (need >= 10)"
+            instructions = guide
+            if cam_name == "FACE CAMERA":
+                gui.update_face_texture(display)
+            gui.update_scene_texture(display)
+            if face_disp is not None:
+                gui.update_face_texture(face_disp)
+            gui.begin_frame()
+            flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
+                     imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
+                     imgui.WINDOW_NO_SCROLLBAR)
+            imgui.set_next_window_position(0, 0)
+            imgui.set_next_window_size(250, gui.height)
+            imgui.begin("##CalibCam", None, flags)
+            imgui.text_colored("Camera Calibration", 0.3, 0.8, 1.0, 1.0)
+            imgui.separator()
+            for line in instructions:
+                imgui.text_wrapped(line)
+            imgui.separator()
+            imgui.text_colored("ENTER = capture    ESC = skip",
+                               0.8, 0.3, 0.3, 1.0)
+            imgui.end()
+            gui.render()
+
+            if gui.was_key_pressed(glfw.KEY_ESCAPE):
+                break
+            if gui.was_key_pressed(glfw.KEY_ENTER):
+                if ret_cb and corners is not None:
+                    frames.append(frame)
+                    print(f"[CalibrateCameras] {cam_name}: sample {len(frames)}")
+                    if len(frames) >= 10:
+                        break
+
+        if len(frames) >= 10:
+            h, w = frames[0].shape[:2]
+            ok = calib.calibrate(frames, w, h)
+            if ok:
+                print(f"[CalibrateCameras] {cam_name}: calibration successful")
+                ret, fb = cap_scene.read()
+                if ret:
+                    fb = _cv2.flip(fb, 1) if cam_name == "FACE CAMERA" else fb
+                    _cv2.putText(fb, f"{cam_name} calibrated!", (50, 50),
+                                font, 1.2, (0, 255, 0), 3)
+                    gui.update_scene_texture(fb)
+            else:
+                print(f"[CalibrateCameras] {cam_name}: calibration failed")
+        else:
+            print(f"[CalibrateCameras] {cam_name}: skipped")
+
+    # Re-init undistort maps for current resolution
+    ret, ff = cap_face.read()
+    if ret:
+        hf, wf = ff.shape[:2]
+        calib_face._ensure_maps(wf, hf)
+    ret, sf = cap_scene.read()
+    if ret:
+        hs, ws = sf.shape[:2]
+        calib_scene._ensure_maps(ws, hs)
+
+    print("[CalibrateCameras] Done.")
+    return True
+
+
 # Face mesh landmark groups for visualization
 _FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
               397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
@@ -894,6 +1020,10 @@ def main():
         cap_face.read()
         cap_scene.read()
 
+    # ── Camera calibrators (lens distortion correction) ──────────────
+    calib_face = CameraCalibrator(face_cam)
+    calib_scene = CameraCalibrator(scene_cam)
+
     # ── Object detector (scene camera) ────────────────────────────────
     detector = ObjectDetector(
         model_path=args.yolo_model,
@@ -937,6 +1067,7 @@ def main():
     _trigger_quit = False
     _trigger_recal = False
     _trigger_depth_cal = False
+    _trigger_cam_cal = False
 
     try:
         while True:
@@ -947,6 +1078,13 @@ def main():
                 break
 
             frame_face = cv2.flip(frame_face, 1)
+
+            # Undistort both feeds if calibration available
+            if calib_face.ready:
+                frame_face = calib_face.undistort(frame_face)
+            if calib_scene.ready:
+                frame_scene = calib_scene.undistort(frame_scene)
+
             h_scene, w_scene = frame_scene.shape[:2]
 
             # FPS
@@ -1173,7 +1311,7 @@ def main():
             if time.time() - help_t < 5:
                 draw_text_stroke(
                     canvas,
-                    "ESC: quit  |  c: re-calibrate  |  f: fullscreen  |  d: depth",
+                    "ESC: quit  |  c: re-calibrate  |  v: cal cameras  |  f: fullscreen  |  d: depth",
                     (w_scene // 2 - 250, h_scene - 40),
                     scale=0.45, color=Theme.TEXT_DIM,
                 )
@@ -1204,6 +1342,8 @@ def main():
                     _trigger_recal = True
                 elif action == 'depth_cal':
                     _trigger_depth_cal = True
+                elif action == 'cam_cal':
+                    _trigger_cam_cal = True
                 elif isinstance(action, tuple) and action[0] == 'toggle_depth':
                     show_depth = action[1]
 
@@ -1277,9 +1417,16 @@ def main():
                 else:
                     topbar.toast("Depth cal. cancelled", Theme.ACCENT_ORANGE)
 
+            elif gui.was_key_pressed(glfw.KEY_V) or _trigger_cam_cal:
+                topbar.toast("Camera calibration...", Theme.ACCENT_CYAN)
+                _calibrate_cameras(calib_face, calib_scene,
+                                   cap_face, cap_scene, gui)
+                topbar.toast("Camera cal. done", Theme.ACCENT_GREEN)
+
             _trigger_quit = False
             _trigger_recal = False
             _trigger_depth_cal = False
+            _trigger_cam_cal = False
 
     except KeyboardInterrupt:
         print("\n[FoGaze] Interrupted.")
