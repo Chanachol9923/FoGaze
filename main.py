@@ -422,6 +422,7 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
 
     distances = [100]
     samples = []  # (distance_cm, scale)
+    """
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     guide = [
