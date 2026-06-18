@@ -163,7 +163,8 @@ def _scan_cameras(max_cam=10):
 def _draw_main_menu(gui, fps_val=0, show_depth=False,
                      zone_txt="--", focus_txt="--", depth_txt="--",
                      cal_mode=None, cal_step=None, cal_progress=None,
-                     face_tex_id=None, depth_tex_id=None):
+                     face_tex_id=None, depth_tex_id=None,
+                     eye_tex_id=None):
     """Left-side MainMenu panel. Returns action string or None."""
     flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
              imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
@@ -207,11 +208,20 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
     pw, ph = 230, 172  # 4:3 fits 250-wide panel
     if face_tex_id is not None:
         imgui.separator()
+        imgui.text_colored("FACE TRACK", 0.3, 1.0, 0.5, 1.0)
         imgui.image(face_tex_id, pw, ph)
+
+    # Eye tracking preview below face
+    if eye_tex_id is not None:
+        imgui.separator()
+        imgui.text_colored("EYE TRACK", 0.3, 1.0, 0.5, 1.0)
+        ew = min(pw, imgui.get_content_region_max()[0] - imgui.get_cursor_pos()[0])
+        imgui.image(eye_tex_id, ew, 60)
 
     # Depth colormap preview below face (only when toggled on)
     if show_depth and depth_tex_id is not None:
         imgui.separator()
+        imgui.text_colored("DEPTH MAP", 0.3, 1.0, 0.5, 1.0)
         imgui.image(depth_tex_id, pw, ph)
 
     imgui.end()
@@ -587,6 +597,149 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
     return True
 
 
+# Face mesh landmark groups for visualization
+_FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+              397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+              172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109, 10]
+_LEFT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158,
+             159, 160, 161, 246]
+_RIGHT_EYE = [263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385,
+              386, 387, 388, 466]
+_LEFT_IRIS = 468
+_RIGHT_IRIS = 473
+_LEFT_EYE_CORNERS = [33, 133]
+_RIGHT_EYE_CORNERS = [362, 263]
+
+
+def _align_face_and_eyes(face_bgr, landmarks, h_f, w_f):
+    """Extract aligned face + eye crops with landmark visualization.
+
+    Returns: (aligned_display, eye_display) or (None, None)
+      aligned_display: BGR face crop rotated so eyes are horizontal + landmarks
+      eye_display:     BGR image with L/R eyes side-by-side + iris points
+    """
+    xs = [lm.x * w_f for lm in landmarks]
+    ys = [lm.y * h_f for lm in landmarks]
+
+    # Eye centers
+    l_ex = (landmarks[_LEFT_EYE_CORNERS[0]].x + landmarks[_LEFT_EYE_CORNERS[1]].x) * 0.5 * w_f
+    l_ey = (landmarks[_LEFT_EYE_CORNERS[0]].y + landmarks[_LEFT_EYE_CORNERS[1]].y) * 0.5 * h_f
+    r_ex = (landmarks[_RIGHT_EYE_CORNERS[0]].x + landmarks[_RIGHT_EYE_CORNERS[1]].x) * 0.5 * w_f
+    r_ey = (landmarks[_RIGHT_EYE_CORNERS[0]].y + landmarks[_RIGHT_EYE_CORNERS[1]].y) * 0.5 * h_f
+
+    face_cx = (min(xs) + max(xs)) * 0.5
+    face_cy = (min(ys) + max(ys)) * 0.5
+
+    # Rotation angle to make eyes horizontal
+    angle = np.degrees(np.arctan2(r_ey - l_ey, r_ex - l_ex))
+
+    # Face size with margin
+    face_w = max(xs) - min(xs)
+    face_h = max(ys) - min(ys)
+    crop_size = int(max(face_w, face_h) * 1.6)
+
+    M = cv2.getRotationMatrix2D((face_cx, face_cy), angle, 1.0)
+    aligned = cv2.warpAffine(face_bgr, M, (w_f, h_f), flags=cv2.INTER_LINEAR)
+
+    x1 = int(max(0, face_cx - crop_size / 2))
+    y1 = int(max(0, face_cy - crop_size / 2))
+    x2 = int(min(w_f, x1 + crop_size))
+    y2 = int(min(h_f, y1 + crop_size))
+
+    face_crop = aligned[y1:y2, x1:x2].copy()
+    if face_crop.size == 0:
+        return None, None
+
+    # Transform landmarks to cropped coords
+    pts = np.array([[lm.x * w_f, lm.y * h_f] for lm in landmarks], dtype=np.float32)
+    ones = np.ones((pts.shape[0], 1), dtype=np.float32)
+    pts_h = np.hstack([pts, ones])
+    transformed = (M @ pts_h.T).T
+    crop_pts = transformed - np.array([x1, y1])
+
+    fh, fw = face_crop.shape[:2]
+
+    # ── Draw face mesh on face_crop ──
+    # Face oval
+    for i in range(len(_FACE_OVAL) - 1):
+        a, b = _FACE_OVAL[i], _FACE_OVAL[i + 1]
+        p1 = (int(crop_pts[a][0]), int(crop_pts[a][1]))
+        p2 = (int(crop_pts[b][0]), int(crop_pts[b][1]))
+        cv2.line(face_crop, p1, p2, (100, 200, 100), 1)
+
+    # Eye contours (yellow)
+    for pts_list, color in [(_LEFT_EYE, (0, 255, 255)), (_RIGHT_EYE, (0, 255, 255))]:
+        for i in range(len(pts_list) - 1):
+            a, b = pts_list[i], pts_list[i + 1]
+            p1 = (int(crop_pts[a][0]), int(crop_pts[a][1]))
+            p2 = (int(crop_pts[b][0]), int(crop_pts[b][1]))
+            cv2.line(face_crop, p1, p2, color, 2)
+        # Close contour
+        a, b = pts_list[-1], pts_list[0]
+        p1 = (int(crop_pts[a][0]), int(crop_pts[a][1]))
+        p2 = (int(crop_pts[b][0]), int(crop_pts[b][1]))
+        cv2.line(face_crop, p1, p2, color, 2)
+
+    # Iris centers (cyan + crosshair)
+    for iris_idx in [_LEFT_IRIS, _RIGHT_IRIS]:
+        ix, iy = int(crop_pts[iris_idx][0]), int(crop_pts[iris_idx][1])
+        cv2.circle(face_crop, (ix, iy), 3, (255, 255, 0), -1)
+        cv2.line(face_crop, (ix - 5, iy), (ix + 5, iy), (255, 255, 0), 1)
+        cv2.line(face_crop, (ix, iy - 5), (ix, iy + 5), (255, 255, 0), 1)
+
+    # ── Extract eye regions from the ALIGNED face ──
+    def _eye_crop(center_x, center_y, scale=1.8):
+        eye_r = int(max(face_w, face_h) * 0.06 * scale)
+        ex1 = int(max(0, center_x - eye_r))
+        ey1 = int(max(0, center_y - eye_r))
+        ex2 = int(min(fw, center_x + eye_r))
+        ey2 = int(min(fh, center_y + eye_r))
+        crop = face_crop[ey1:ey2, ex1:ex2].copy()
+        if crop.size == 0:
+            return None
+        return crop, (ex1, ey1)
+
+    l_cx = (crop_pts[_LEFT_EYE_CORNERS[0]][0] + crop_pts[_LEFT_EYE_CORNERS[1]][0]) * 0.5
+    l_cy = (crop_pts[_LEFT_EYE_CORNERS[0]][1] + crop_pts[_LEFT_EYE_CORNERS[1]][1]) * 0.5
+    r_cx = (crop_pts[_RIGHT_EYE_CORNERS[0]][0] + crop_pts[_RIGHT_EYE_CORNERS[1]][0]) * 0.5
+    r_cy = (crop_pts[_RIGHT_EYE_CORNERS[0]][1] + crop_pts[_RIGHT_EYE_CORNERS[1]][1]) * 0.5
+
+    l_res = _eye_crop(l_cx, l_cy, 2.0)
+    r_res = _eye_crop(r_cx, r_cy, 2.0)
+
+    if l_res is None or r_res is None:
+        return face_crop, None
+
+    l_crop, (lox, loy) = l_res
+    r_crop, (rox, roy) = r_res
+
+    # Draw iris on eye crops
+    l_iris_pt = (int(crop_pts[_LEFT_IRIS][0] - lox), int(crop_pts[_LEFT_IRIS][1] - loy))
+    r_iris_pt = (int(crop_pts[_RIGHT_IRIS][0] - rox), int(crop_pts[_RIGHT_IRIS][1] - roy))
+
+    for crop_img, iris_pt in [(l_crop, l_iris_pt), (r_crop, r_iris_pt)]:
+        cv2.circle(crop_img, iris_pt, 2, (255, 255, 0), -1)
+        cv2.line(crop_img, (iris_pt[0] - 4, iris_pt[1]), (iris_pt[0] + 4, iris_pt[1]),
+                 (255, 255, 0), 1)
+        cv2.line(crop_img, (iris_pt[0], iris_pt[1] - 4), (iris_pt[0], iris_pt[1] + 4),
+                 (255, 255, 0), 1)
+
+    # Pad to same height
+    lh, lw = l_crop.shape[:2]
+    rh, rw = r_crop.shape[:2]
+    eye_h = max(lh, rh)
+    if lh < eye_h:
+        pad = np.zeros((eye_h - lh, lw, 3), dtype=np.uint8)
+        l_crop = np.vstack([l_crop, pad])
+    if rh < eye_h:
+        pad = np.zeros((eye_h - rh, rw, 3), dtype=np.uint8)
+        r_crop = np.vstack([r_crop, pad])
+
+    eye_display = np.hstack([l_crop, r_crop])
+
+    return face_crop, eye_display
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="FoGaze — two-camera gaze + object tracking"
@@ -939,6 +1092,7 @@ def main():
 
             # ── Face camera display (separate window) ─────────────────
             face_display = frame_face.copy()
+            eye_display = None
             if (features is not None
                     and hasattr(gaze_estimator, '_face_landmarker')):
                 try:
@@ -956,22 +1110,18 @@ def main():
                     if result and result.face_landmarks:
                         lm = result.face_landmarks[0]
                         h_f, w_f = face_display.shape[:2]
-                        xs = [p.x for p in lm]
-                        ys = [p.y for p in lm]
-                        cx = (min(xs) + max(xs)) * 0.5 * w_f
-                        cy = (min(ys) + max(ys)) * 0.5 * h_f
-                        hhw = (max(xs) - min(xs)) * 0.7 * w_f
-                        hhh = (max(ys) - min(ys)) * 0.7 * h_f
-                        fx1 = int(max(0, cx - hhw))
-                        fx2 = int(min(w_f, cx + hhw))
-                        fy1 = int(max(0, cy - hhh))
-                        fy2 = int(min(h_f, cy + hhh))
-                        if fx2 > fx1 and fy2 > fy1:
-                            cv2.rectangle(face_display, (fx1, fy1),
-                                          (fx2, fy2), Theme.ACCENT_GREEN, 2)
+                        aligned_face, eye_img = _align_face_and_eyes(
+                            face_display, lm, h_f, w_f
+                        )
+                        if aligned_face is not None:
+                            face_display = aligned_face
+                        if eye_img is not None:
+                            eye_display = eye_img
                 except Exception:
                     pass
             gui.update_face_texture(face_display)
+            if eye_display is not None:
+                gui.update_eye_texture(eye_display)
 
             # ── Canvas (scene feed + overlays) ────────────────────────
             canvas = frame_scene.copy()
@@ -1095,6 +1245,7 @@ def main():
                     ZONE_PHRASES[zi], fname, depth_txt,
                     face_tex_id=gui.face_texture_id,
                     depth_tex_id=gui.depth_texture_id,
+                    eye_tex_id=gui.eye_texture_id,
                 )
                 if action == 'quit':
                     _trigger_quit = True

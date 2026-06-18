@@ -78,6 +78,7 @@ class GUIOverlay:
         self._scene_tex_w = self._scene_tex_h = 0
         self._face_tex = None
         self._depth_tex = None
+        self._eye_tex = None
 
         # ── Key event handling (chain before GlfwRenderer) ──────────
         self._keys_pressed: set[int] = set()
@@ -118,6 +119,11 @@ class GUIOverlay:
     def depth_texture_id(self):
         """OpenGL texture ID for the depth colormap, or None."""
         return self._depth_tex
+
+    @property
+    def eye_texture_id(self):
+        """OpenGL texture ID for the eye tracking display, or None."""
+        return self._eye_tex
 
     # ── Key / event API ────────────────────────────────────────────────
 
@@ -231,10 +237,27 @@ class GUIOverlay:
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, w, h, 0,
                         gl.GL_RGB, gl.GL_UNSIGNED_BYTE, data)
 
+    def update_eye_texture(self, bgr: np.ndarray):
+        """Upload an eye tracking BGR image as an OpenGL texture."""
+        h, w = bgr.shape[:2]
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        data = np.ascontiguousarray(rgb)
+
+        if self._eye_tex is not None:
+            gl.glDeleteTextures([self._eye_tex])
+        self._eye_tex = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self._eye_tex)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, w, h, 0,
+                        gl.GL_RGB, gl.GL_UNSIGNED_BYTE, data)
+
     # ── Cleanup ────────────────────────────────────────────────────────
 
     def close(self):
-        for tex in [self._scene_tex, self._face_tex, self._depth_tex]:
+        for tex in [self._scene_tex, self._face_tex, self._depth_tex, self._eye_tex]:
             if tex is not None:
                 gl.glDeleteTextures([tex])
         self._impl.shutdown()
