@@ -612,132 +612,83 @@ _RIGHT_EYE_CORNERS = [362, 263]
 
 
 def _align_face_and_eyes(face_bgr, landmarks, h_f, w_f):
-    """Extract aligned face + eye crops with landmark visualization.
+    """Draw face mesh on full frame + extract eye crops with iris markers.
 
-    Returns: (aligned_display, eye_display) or (None, None)
-      aligned_display: BGR face crop rotated so eyes are horizontal + landmarks
-      eye_display:     BGR image with L/R eyes side-by-side + iris points
+    Returns: (face_display, eye_display) or (None, None)
+      face_display: full BGR frame with face/eye/iris overlay lines
+      eye_display:  BGR image with L/R eyes side-by-side + iris points
     """
+    display = face_bgr.copy()
     xs = [lm.x * w_f for lm in landmarks]
     ys = [lm.y * h_f for lm in landmarks]
 
-    # Eye centers
-    l_ex = (landmarks[_LEFT_EYE_CORNERS[0]].x + landmarks[_LEFT_EYE_CORNERS[1]].x) * 0.5 * w_f
-    l_ey = (landmarks[_LEFT_EYE_CORNERS[0]].y + landmarks[_LEFT_EYE_CORNERS[1]].y) * 0.5 * h_f
-    r_ex = (landmarks[_RIGHT_EYE_CORNERS[0]].x + landmarks[_RIGHT_EYE_CORNERS[1]].x) * 0.5 * w_f
-    r_ey = (landmarks[_RIGHT_EYE_CORNERS[0]].y + landmarks[_RIGHT_EYE_CORNERS[1]].y) * 0.5 * h_f
-
-    face_cx = (min(xs) + max(xs)) * 0.5
-    face_cy = (min(ys) + max(ys)) * 0.5
-
-    # Rotation angle to make eyes horizontal
-    angle = np.degrees(np.arctan2(r_ey - l_ey, r_ex - l_ex))
-
-    # Face size with margin
-    face_w = max(xs) - min(xs)
-    face_h = max(ys) - min(ys)
-    crop_size = int(max(face_w, face_h) * 1.6)
-
-    M = cv2.getRotationMatrix2D((face_cx, face_cy), angle, 1.0)
-    aligned = cv2.warpAffine(face_bgr, M, (w_f, h_f), flags=cv2.INTER_LINEAR)
-
-    x1 = int(max(0, face_cx - crop_size / 2))
-    y1 = int(max(0, face_cy - crop_size / 2))
-    x2 = int(min(w_f, x1 + crop_size))
-    y2 = int(min(h_f, y1 + crop_size))
-
-    face_crop = aligned[y1:y2, x1:x2].copy()
-    if face_crop.size == 0:
-        return None, None
-
-    # Transform landmarks to cropped coords
-    pts = np.array([[lm.x * w_f, lm.y * h_f] for lm in landmarks], dtype=np.float32)
-    ones = np.ones((pts.shape[0], 1), dtype=np.float32)
-    pts_h = np.hstack([pts, ones])
-    transformed = (M @ pts_h.T).T
-    crop_pts = transformed - np.array([x1, y1])
-
-    fh, fw = face_crop.shape[:2]
-
-    # ── Draw face mesh on face_crop ──
-    # Face oval
+    # ── Draw face oval ──
     for i in range(len(_FACE_OVAL) - 1):
         a, b = _FACE_OVAL[i], _FACE_OVAL[i + 1]
-        p1 = (int(crop_pts[a][0]), int(crop_pts[a][1]))
-        p2 = (int(crop_pts[b][0]), int(crop_pts[b][1]))
-        cv2.line(face_crop, p1, p2, (100, 200, 100), 1)
+        p1 = (int(landmarks[a].x * w_f), int(landmarks[a].y * h_f))
+        p2 = (int(landmarks[b].x * w_f), int(landmarks[b].y * h_f))
+        cv2.line(display, p1, p2, (100, 200, 100), 1)
 
-    # Eye contours (yellow)
-    for pts_list, color in [(_LEFT_EYE, (0, 255, 255)), (_RIGHT_EYE, (0, 255, 255))]:
+    # ── Eye contours (yellow) ──
+    for pts_list in [_LEFT_EYE, _RIGHT_EYE]:
         for i in range(len(pts_list) - 1):
             a, b = pts_list[i], pts_list[i + 1]
-            p1 = (int(crop_pts[a][0]), int(crop_pts[a][1]))
-            p2 = (int(crop_pts[b][0]), int(crop_pts[b][1]))
-            cv2.line(face_crop, p1, p2, color, 2)
-        # Close contour
+            p1 = (int(landmarks[a].x * w_f), int(landmarks[a].y * h_f))
+            p2 = (int(landmarks[b].x * w_f), int(landmarks[b].y * h_f))
+            cv2.line(display, p1, p2, (0, 255, 255), 2)
         a, b = pts_list[-1], pts_list[0]
-        p1 = (int(crop_pts[a][0]), int(crop_pts[a][1]))
-        p2 = (int(crop_pts[b][0]), int(crop_pts[b][1]))
-        cv2.line(face_crop, p1, p2, color, 2)
+        p1 = (int(landmarks[a].x * w_f), int(landmarks[a].y * h_f))
+        p2 = (int(landmarks[b].x * w_f), int(landmarks[b].y * h_f))
+        cv2.line(display, p1, p2, (0, 255, 255), 2)
 
-    # Iris centers (cyan + crosshair)
+    # ── Iris centers (cyan + crosshair) ──
     for iris_idx in [_LEFT_IRIS, _RIGHT_IRIS]:
-        ix, iy = int(crop_pts[iris_idx][0]), int(crop_pts[iris_idx][1])
-        cv2.circle(face_crop, (ix, iy), 3, (255, 255, 0), -1)
-        cv2.line(face_crop, (ix - 5, iy), (ix + 5, iy), (255, 255, 0), 1)
-        cv2.line(face_crop, (ix, iy - 5), (ix, iy + 5), (255, 255, 0), 1)
+        ix = int(landmarks[iris_idx].x * w_f)
+        iy = int(landmarks[iris_idx].y * h_f)
+        cv2.circle(display, (ix, iy), 3, (255, 255, 0), -1)
+        cv2.line(display, (ix - 5, iy), (ix + 5, iy), (255, 255, 0), 1)
+        cv2.line(display, (ix, iy - 5), (ix, iy + 5), (255, 255, 0), 1)
 
-    # ── Extract eye regions from the ALIGNED face ──
-    def _eye_crop(center_x, center_y, scale=1.8):
-        eye_r = int(max(face_w, face_h) * 0.06 * scale)
-        ex1 = int(max(0, center_x - eye_r))
-        ey1 = int(max(0, center_y - eye_r))
-        ex2 = int(min(fw, center_x + eye_r))
-        ey2 = int(min(fh, center_y + eye_r))
-        crop = face_crop[ey1:ey2, ex1:ex2].copy()
+    # ── Extract L/R eye regions ──
+    def _get_eye_roi(corner_a, corner_b, iris_idx):
+        ax, ay = landmarks[corner_a].x * w_f, landmarks[corner_a].y * h_f
+        bx, by = landmarks[corner_b].x * w_f, landmarks[corner_b].y * h_f
+        cx = (ax + bx) * 0.5
+        cy = (ay + by) * 0.5
+        eye_r = int(max(abs(bx - ax), abs(by - ay)) * 1.3)
+        x1 = int(max(0, cx - eye_r))
+        y1 = int(max(0, cy - eye_r))
+        x2 = int(min(w_f, cx + eye_r))
+        y2 = int(min(h_f, cy + eye_r))
+        crop = display[y1:y2, x1:x2].copy()
         if crop.size == 0:
             return None
-        return crop, (ex1, ey1)
+        # Redraw iris on crop with local coords
+        lx = int(landmarks[iris_idx].x * w_f - x1)
+        ly = int(landmarks[iris_idx].y * h_f - y1)
+        cv2.circle(crop, (lx, ly), 2, (255, 255, 0), -1)
+        cv2.line(crop, (lx - 4, ly), (lx + 4, ly), (255, 255, 0), 1)
+        cv2.line(crop, (lx, ly - 4), (lx, ly + 4), (255, 255, 0), 1)
+        return crop
 
-    l_cx = (crop_pts[_LEFT_EYE_CORNERS[0]][0] + crop_pts[_LEFT_EYE_CORNERS[1]][0]) * 0.5
-    l_cy = (crop_pts[_LEFT_EYE_CORNERS[0]][1] + crop_pts[_LEFT_EYE_CORNERS[1]][1]) * 0.5
-    r_cx = (crop_pts[_RIGHT_EYE_CORNERS[0]][0] + crop_pts[_RIGHT_EYE_CORNERS[1]][0]) * 0.5
-    r_cy = (crop_pts[_RIGHT_EYE_CORNERS[0]][1] + crop_pts[_RIGHT_EYE_CORNERS[1]][1]) * 0.5
+    l_eye = _get_eye_roi(33, 133, 468)
+    r_eye = _get_eye_roi(362, 263, 473)
 
-    l_res = _eye_crop(l_cx, l_cy, 2.0)
-    r_res = _eye_crop(r_cx, r_cy, 2.0)
+    if l_eye is None or r_eye is None:
+        return display, None
 
-    if l_res is None or r_res is None:
-        return face_crop, None
-
-    l_crop, (lox, loy) = l_res
-    r_crop, (rox, roy) = r_res
-
-    # Draw iris on eye crops
-    l_iris_pt = (int(crop_pts[_LEFT_IRIS][0] - lox), int(crop_pts[_LEFT_IRIS][1] - loy))
-    r_iris_pt = (int(crop_pts[_RIGHT_IRIS][0] - rox), int(crop_pts[_RIGHT_IRIS][1] - roy))
-
-    for crop_img, iris_pt in [(l_crop, l_iris_pt), (r_crop, r_iris_pt)]:
-        cv2.circle(crop_img, iris_pt, 2, (255, 255, 0), -1)
-        cv2.line(crop_img, (iris_pt[0] - 4, iris_pt[1]), (iris_pt[0] + 4, iris_pt[1]),
-                 (255, 255, 0), 1)
-        cv2.line(crop_img, (iris_pt[0], iris_pt[1] - 4), (iris_pt[0], iris_pt[1] + 4),
-                 (255, 255, 0), 1)
-
-    # Pad to same height
-    lh, lw = l_crop.shape[:2]
-    rh, rw = r_crop.shape[:2]
+    lh, lw = l_eye.shape[:2]
+    rh, rw = r_eye.shape[:2]
     eye_h = max(lh, rh)
     if lh < eye_h:
         pad = np.zeros((eye_h - lh, lw, 3), dtype=np.uint8)
-        l_crop = np.vstack([l_crop, pad])
+        l_eye = np.vstack([l_eye, pad])
     if rh < eye_h:
         pad = np.zeros((eye_h - rh, rw, 3), dtype=np.uint8)
-        r_crop = np.vstack([r_crop, pad])
+        r_eye = np.vstack([r_eye, pad])
 
-    eye_display = np.hstack([l_crop, r_crop])
-
-    return face_crop, eye_display
+    eye_display = np.hstack([l_eye, r_eye])
+    return display, eye_display
 
 
 def main():
