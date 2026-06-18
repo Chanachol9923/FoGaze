@@ -418,10 +418,10 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
 def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                      cap_face=None):
     """Interactive depth calibration rendered through GUIOverlay + ImGui.
-    Uses a single 1m reference point: cm = (100 / norm_at_1m) * norm.
-    """
+    Uses a single 1m reference point: scale = 1.0 / depth_m.
+
     distances = [100]
-    samples = []  # (distance_cm, norm)
+    samples = []  # (distance_cm, scale)
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     guide = [
@@ -476,15 +476,15 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
             depth_map = depth_estimator.estimate(frame)
 
             canvas = frame.copy()
-            cv2.putText(canvas, "Depth Calibration  |  1 meter (100cm)",
+            cv2.putText(canvas, "Depth Calibration  |  1 meter",
                         (50, 50), font, 1.2, (0, 255, 255), 3)
             cv2.putText(canvas, "Place object/hand 1m away, centered in crosshair, then press ENTER",
                         (50, 100), font, 0.8, (220, 220, 220), 2)
 
             # Crosshair
             cx, cy = fw // 2, fh // 2
-            r = 25  # visual crosshair radius
-            sample_r = 50  # larger ROI for more stable depth sampling
+            r = 25
+            sample_r = 50
             cv2.line(canvas, (0, cy), (fw, cy), (0, 255, 0), 1)
             cv2.line(canvas, (cx, 0), (cx, fh), (0, 255, 0), 1)
             gap, L = 15, 30
@@ -497,7 +497,7 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
             cv2.circle(canvas, (cx, cy), 3, (0, 255, 0), -1)
 
             # Depth PIP
-            live_cm = None
+            live_m = None
             if depth_map is not None:
                 depth_color = depth_estimator.colormap(depth_map)
                 pip_h, pip_w = fh // 4, fw // 4
@@ -510,13 +510,11 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                             font, 0.5, (0, 0, 255) if freshness > 2.0 else (0, 255, 0), 1)
                 center_roi = depth_map[cy - sample_r:cy + sample_r, cx - sample_r:cx + sample_r]
                 if center_roi.size > 0:
-                    smin, smax = float(depth_map.min()), float(depth_map.max())
-                    if smax > smin:
-                        avg = float(center_roi.mean())
-                        live_cm = depth_estimator.depth_to_distance_cm(avg, smin, smax)
-                        cv2.putText(canvas, f"~{int(live_cm)}cm",
-                                    (x_off, y_off + pip_h + 20),
-                                    font, 0.6, (0, 255, 255), 2)
+                    avg = float(np.median(center_roi))
+                    live_m = avg
+                    cv2.putText(canvas, f"{avg:.2f}m",
+                                (x_off, y_off + pip_h + 20),
+                                font, 0.6, (0, 255, 255), 2)
 
             face_disp = None
             if cap_face is not None:
@@ -525,8 +523,8 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                     face_disp = cv2.flip(ff, 1)
 
             instructions = [
-                "Place hand/object 1 meter (100cm) away",
-                "手や物体を1m(100cm)の距離に置いてください",
+                "Place hand/object 1 meter away",
+                "手や物体を1mの距離に置いてください",
                 "",
                 "Center it in the crosshair",
                 "十字線の中央に合わせてください",
@@ -534,7 +532,7 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                 "ENTER = capture    ESC = cancel",
             ]
 
-            _render_frame(canvas, face_disp, f"Depth 100cm",
+            _render_frame(canvas, face_disp, "Depth Calibration",
                           "", instructions)
 
             if gui.was_key_pressed(glfw.KEY_ESCAPE):
@@ -557,15 +555,10 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                 center_roi = depth_map[cy - sample_r:cy + sample_r, cx - sample_r:cx + sample_r]
                 if center_roi.size == 0:
                     continue
-                scene_min = float(depth_map.min())
-                scene_max = float(depth_map.max())
-                if scene_max == scene_min:
-                    continue
                 avg_depth = float(np.median(center_roi))
-                norm = (avg_depth - scene_min) / (scene_max - scene_min)
-                norm = np.clip(norm, 0, 1)
-                samples.append((dist, norm))
-                print(f"[CalibrateDepth] {dist}cm -> norm={norm:.4f}")
+                scale = 1.0 / avg_depth
+                samples.append((dist, scale))
+                print(f"[CalibrateDepth] 1m -> {avg_depth:.3f}m, scale={scale:.4f}")
 
                 # Green flash
                 fb = frame.copy()
@@ -587,18 +580,10 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
         print("[CalibrateDepth] No sample captured.")
         return False
 
-    # Single-point calibration: cm = (100 / norm_at_1m) * norm
-    norm = samples[0][1]
-    if norm < 0.01:
-        print("[CalibrateDepth] Norm too close to zero, calibration failed.")
-        return False
-    slope = 100.0 / norm
-    intercept = 0.0
-    print(f"[CalibrateDepth] 1m norm={norm:.4f} -> cm = {slope:.3f} * norm")
-    depth_estimator.save_cal(slope, intercept)
-    for d, n in samples:
-        pred = slope * n + intercept
-        print(f"  {d}cm -> norm={n:.4f} -> pred={pred:.1f}cm (err={pred - d:.1f})")
+    # Single-point calibration: scale = 1.0 / depth_m
+    scale = samples[0][1]
+    depth_estimator.save_cal(scale)
+    print(f"[CalibrateDepth] 1m -> scale={scale:.4f}")
     return True
 
 
@@ -705,7 +690,7 @@ def main():
 
     if args.reset_depth_cal:
         gui.close()
-        de = DepthEstimator(device="cuda", depth_size=224)
+        de = DepthEstimator(device="cuda", depth_size=384)
         de.reset_cal()
         return
 
@@ -814,8 +799,8 @@ def main():
     detector.set_detection_interval(args.detection_interval)
 
     # ── Depth estimator ───────────────────────────────────────────────
-    depth_estimator = DepthEstimator(device="cuda", depth_size=224,
-                                     min_interval=0.5)
+    depth_estimator = DepthEstimator(device="cuda", depth_size=384,
+                                     min_interval=1.5)
     show_depth = False
 
     # ── UI components ─────────────────────────────────────────────────

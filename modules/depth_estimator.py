@@ -1,8 +1,3 @@
-"""Depth estimation using Depth-Anything-V2 (transformers/HuggingFace).
-
-Runs inference in a background thread so the main loop is never blocked.
-"""
-
 from __future__ import annotations
 
 import threading
@@ -23,16 +18,13 @@ DEPTH_CAL_PATH = Path.home() / ".cache" / "fogaze3" / "depth_cal.npz"
 
 
 class DepthEstimator:
-    MODEL_NAME = "depth-anything/Depth-Anything-V2-Small-hf"
+    MODEL_NAME = "depth-anything/Depth-Anything-V2-Metric-Hypersim-Base"
 
-    def __init__(self, device="cuda", depth_size: int = 224,
-                 min_interval: float = 0.0):
-        """depth_size: model input resolution (px). Smaller = faster but lower quality.
-        min_interval: minimum seconds between async inference submissions."""
+    def __init__(self, device="cuda", depth_size: int = 384,
+                 min_interval: float = 1.5):
         self._depth_size = depth_size
         self._min_interval = max(0.0, min_interval)
         self._last_submit_time = 0.0
-        # Check CUDA compatibility (GPU compute capability)
         cuda_ok = False
         if device == "cuda" and torch.cuda.is_available():
             try:
@@ -51,7 +43,6 @@ class DepthEstimator:
         print(f"[DepthEstimator] Using device: {self.device}")
 
         self.processor = AutoImageProcessor.from_pretrained(self.MODEL_NAME)
-        # Use smaller input for faster CPU inference
         self.processor.size = {"height": self._depth_size, "width": self._depth_size}
         print(f"[DepthEstimator] Processor input size: {self._depth_size}x{self._depth_size}")
         self.model = (
@@ -66,8 +57,7 @@ class DepthEstimator:
         self._last_depth_time = 0.0
         self._h, self._w = None, None
 
-        # Calibration model: cm = slope * norm + intercept
-        self.cal_model = None
+        self.cal_scale = None
         self._load_cal()
 
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
@@ -77,23 +67,19 @@ class DepthEstimator:
         if DEPTH_CAL_PATH.exists():
             try:
                 data = np.load(DEPTH_CAL_PATH)
-                slope = float(data["slope"])
-                intercept = float(data["intercept"])
-                self.cal_model = {"slope": slope, "intercept": intercept}
-                print(
-                    f"[DepthEstimator] Loaded calibration: cm = {slope:.3f} * norm + {intercept:.1f}"
-                )
+                self.cal_scale = float(data["scale"])
+                print(f"[DepthEstimator] Loaded calibration scale: {self.cal_scale:.4f}")
             except Exception as e:
                 print(f"[DepthEstimator] Failed to load depth calibration: {e}")
 
-    def save_cal(self, slope: float, intercept: float):
-        self.cal_model = {"slope": slope, "intercept": intercept}
+    def save_cal(self, scale: float):
+        self.cal_scale = scale
         DEPTH_CAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(DEPTH_CAL_PATH, slope=slope, intercept=intercept)
-        print(f"[DepthEstimator] Saved calibration: cm = {slope:.3f} * norm + {intercept:.1f}")
+        np.savez(DEPTH_CAL_PATH, scale=scale)
+        print(f"[DepthEstimator] Saved calibration scale: {scale:.4f}")
 
     def reset_cal(self):
-        self.cal_model = None
+        self.cal_scale = None
         if DEPTH_CAL_PATH.exists():
             DEPTH_CAL_PATH.unlink()
         print("[DepthEstimator] Calibration reset.")
@@ -142,15 +128,12 @@ class DepthEstimator:
 
     @property
     def depth_freshness(self) -> float:
-        """Seconds since the last depth map was computed. Inf if never."""
         with self._lock:
             if self._last_depth_time == 0:
                 return float('inf')
             return _time.time() - self._last_depth_time
 
     def estimate(self, image_bgr: np.ndarray) -> np.ndarray | None:
-        """Submit frame for async inference (throttled by min_interval).
-        Returns the latest completed depth map (non-blocking)."""
         self._h, self._w = image_bgr.shape[:2]
         now = _time.time()
         if now - self._last_submit_time >= self._min_interval:
@@ -174,28 +157,17 @@ class DepthEstimator:
         self, depth_value: float, scene_min: float | None = None,
         scene_max: float | None = None,
     ) -> float:
-        """Convert raw DA2V depth to approximate cm.
+        """Convert raw DA2V metric depth (meters) to cm.
 
-        DA2V: higher value = farther away.
-        If calibrated: cm = slope * norm + intercept.
-        Otherwise falls back to heuristic (20-200cm linear)."""
-        if scene_min is None or scene_max is None:
-            with self._lock:
-                d = self._last_depth
-            if d is None:
-                return 0
-            scene_min = float(d.min())
-            scene_max = float(d.max())
-        if scene_max == scene_min:
-            return 100
-        norm = (depth_value - scene_min) / (scene_max - scene_min)
-        norm = np.clip(norm, 0, 1)
-        if self.cal_model is not None:
-            return self.cal_model["slope"] * norm + self.cal_model["intercept"]
-        return 200 * norm + 20
+        Metric model output is already in meters.
+        If calibrated, applies a fine-tuning scale factor.
+        """
+        cm = depth_value * 100.0
+        if self.cal_scale is not None:
+            cm *= self.cal_scale
+        return cm
 
     def colormap(self, depth_map: np.ndarray | None = None) -> np.ndarray:
-        """Return a color-mapped depth image (overlay)."""
         if depth_map is not None:
             d = depth_map
         else:
