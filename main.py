@@ -419,10 +419,9 @@ def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
                      cap_face=None):
     """Interactive depth calibration rendered through GUIOverlay + ImGui.
     Uses a single 1m reference point: scale = 1.0 / depth_m.
-
-    distances = [100]
-    samples = []  # (distance_cm, scale)
     """
+    distances = [100]
+    samples = []
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     guide = [
