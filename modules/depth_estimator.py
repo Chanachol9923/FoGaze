@@ -18,7 +18,7 @@ DEPTH_CAL_PATH = Path.home() / ".cache" / "fogaze3" / "depth_cal.npz"
 
 
 class DepthEstimator:
-    MODEL_NAME = "depth-anything/Depth-Anything-V2-Metric-Hypersim-Base"
+    MODEL_NAME = "depth-anything/Depth-Anything-V2-Metric-Indoor-Base-hf"
 
     def __init__(self, device="cuda", depth_size: int = 384,
                  min_interval: float = 1.5):
