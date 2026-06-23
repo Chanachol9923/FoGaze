@@ -55,6 +55,7 @@ sudo apt update
 sudo apt install -y \
   ros-humble-moveit \
   ros-humble-moveit-resources-panda-moveit-config \
+  ros-humble-ros2-control ros-humble-ros2-controllers \  # controller_manager for the Panda demo
   ros-humble-ros-gz            # only for full Gazebo physics
 
 # Python MoveGroup interface used by moveit_pick_executor:
@@ -67,11 +68,25 @@ Run:
 ros2 launch fogaze_manip pickup_moveit.launch.py   # Panda + MoveIt + RViz
 python3 main.py --ros
 ```
+This brings up `move_group` + RViz + simulated controllers, **mirrors every YOLO
+detection into the MoveIt planning scene** at its real depth-derived position
+(`scene_publisher`), and runs the pick pipeline. The arm really plans + moves;
+`scene_publisher` auto-clears the scene while a grasp executes so the target box
+doesn't block the gripper, then restores it.
 
-### ⚠ Eye-to-hand calibration (required for a real pick)
-`pickup_moveit.launch.py` publishes a **placeholder** static transform
-`panda_link0 → camera_color_optical_frame`. Replace the translation/rotation
-with your measured camera-to-arm pose, or the arm will reach the wrong place.
+> **MoveIt group names:** this stack targets the `moveit_resources` Panda
+> (groups `panda_arm` / `hand`, EE `panda_hand`). pymoveit2's bundled panda
+> preset instead assumes `arm`/`gripper`/`panda_hand_tcp`, which don't exist
+> here and make every plan fail — `moveit_pick_executor` overrides them via the
+> `arm_group` / `gripper_group` / `end_effector` parameters.
+
+### ⚠ Eye-to-hand calibration
+`pickup_moveit.launch.py` publishes a **sim-default** static transform
+`panda_link0 → camera_color_optical_frame` — camera 0.4 m above the base looking
+straight forward, upright (REP-103 optical, quat `-0.5, 0.5, -0.5, 0.5`). This
+puts objects detected at 0.3–0.7 m inside the Panda's reach. For a **real**
+camera+arm rig, replace the 7 numbers with a measured / hand-eye calibration or
+the arm reaches the wrong absolute spot.
 
 ### Full Gazebo physics (optional)
 `worlds/fogaze_table.sdf` has a table + a can (graspable), a pen (too thin),
@@ -87,8 +102,9 @@ the pick under physics.
 ## Topics
 | topic | type | by | meaning |
 |---|---|---|---|
-| `fogaze/objects` | std_msgs/String (JSON) | app | all objects/frame (debug) |
+| `fogaze/objects` | std_msgs/String (JSON) | app | all objects/frame (debug + scene) |
 | `fogaze/pickup` | std_msgs/String (JSON) | app | focused object to pick |
 | `fogaze/pick_pose` | geometry_msgs/PoseStamped | planner | target in arm frame |
 | `fogaze/pickup_status` | std_msgs/String | planner/exec | human-readable status |
 | `fogaze/arm_marker` | visualization_msgs/Marker | mock exec | gripper viz |
+| `collision_object` | moveit_msgs/CollisionObject | scene_publisher | YOLO objects in the MoveIt scene |

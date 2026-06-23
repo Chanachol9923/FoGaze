@@ -40,15 +40,23 @@ def generate_launch_description():
         # Simulated Panda + MoveIt move_group + RViz.
         IncludeLaunchDescription(PythonLaunchDescriptionSource(panda_demo)),
 
-        # Where the camera sits relative to the arm base.  REPLACE the
-        # translation/rotation with your real eye-to-hand calibration —
-        # otherwise the arm will reach the wrong place.
+        # Eye-to-hand: where the camera sits relative to the arm base.
+        # Sim default — camera 0.4 m above the base looking straight forward
+        # (+x), upright, with the REP-103 optical-frame rotation
+        # (quat -0.5, 0.5, -0.5, 0.5).  This puts objects detected at
+        # 0.3-0.7 m squarely inside the Panda's reach.  For a REAL camera+arm
+        # rig, REPLACE these 7 numbers with a measured/hand-eye calibration —
+        # otherwise the arm reaches the wrong absolute spot.
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
             name="arm_to_camera",
-            arguments=["0.5", "0.0", "0.5", "0", "1.57", "0",
-                       "panda_link0", "camera_color_optical_frame"],
+            arguments=[
+                "--x", "0.0", "--y", "0.0", "--z", "0.4",
+                "--qx", "-0.5", "--qy", "0.5", "--qz", "-0.5", "--qw", "0.5",
+                "--frame-id", "panda_link0",
+                "--child-frame-id", "camera_color_optical_frame",
+            ],
         ),
 
         Node(
@@ -63,6 +71,15 @@ def generate_launch_description():
             package="fogaze_manip",
             executable="moveit_pick_executor",
             name="moveit_pick_executor",
+            output="screen",
+        ),
+        # Mirror every YOLO detection into the MoveIt planning scene at its
+        # real depth-derived position, so the scene "appears" in sim.
+        Node(
+            package="fogaze_manip",
+            executable="scene_publisher",
+            name="scene_publisher",
+            parameters=[cfg, {"use_tf": True}],
             output="screen",
         ),
     ])

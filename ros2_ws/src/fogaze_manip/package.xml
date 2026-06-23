@@ -17,6 +17,8 @@
   <exec_depend>visualization_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>tf2_geometry_msgs</exec_depend>
+  <exec_depend>moveit_msgs</exec_depend>
+  <exec_depend>shape_msgs</exec_depend>
 
   <!-- Tier 2 (arm bring-up); install these to run the real sim, see README -->
   <exec_depend>moveit</exec_depend>

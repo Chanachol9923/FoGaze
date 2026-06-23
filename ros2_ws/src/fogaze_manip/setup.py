@@ -27,6 +27,7 @@ setup(
             "pickup_planner = fogaze_manip.pickup_planner:main",
             "mock_arm_executor = fogaze_manip.mock_arm_executor:main",
             "moveit_pick_executor = fogaze_manip.moveit_pick_executor:main",
+            "scene_publisher = fogaze_manip.scene_publisher:main",
         ],
     },
 )

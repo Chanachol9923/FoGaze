@@ -40,6 +40,14 @@ class MoveItPickExecutor(Node):
     def __init__(self):
         super().__init__("moveit_pick_executor")
         self.declare_parameter("synchronous", True)
+        # Group / EE names for the *moveit_resources* Panda config.  pymoveit2's
+        # bundled panda preset assumes "arm"/"gripper"/"panda_hand_tcp", which do
+        # NOT exist in moveit_resources_panda_moveit_config (groups are
+        # "panda_arm"/"hand", and there is no _tcp frame) — leaving the defaults
+        # makes every plan fail with "Cannot find planning configuration".
+        self.declare_parameter("arm_group", "panda_arm")
+        self.declare_parameter("gripper_group", "hand")
+        self.declare_parameter("end_effector", "panda_hand")
         self._busy = False
         self._status = self.create_publisher(String, "fogaze/pickup_status", 1)
 
@@ -51,13 +59,16 @@ class MoveItPickExecutor(Node):
                 PoseStamped, "fogaze/pick_pose", self._warn_missing, 1)
             return
 
+        arm_group = self.get_parameter("arm_group").value
+        gripper_group = self.get_parameter("gripper_group").value
+        end_effector = self.get_parameter("end_effector").value
         cb = ReentrantCallbackGroup()
         self.moveit2 = MoveIt2(
             node=self,
             joint_names=panda.joint_names(),
             base_link_name=panda.base_link_name(),
-            end_effector_name=panda.end_effector_name(),
-            group_name=panda.MOVE_GROUP_ARM,
+            end_effector_name=end_effector,
+            group_name=arm_group,
             callback_group=cb,
         )
         self.gripper = MoveIt2Gripper(
@@ -65,7 +76,7 @@ class MoveItPickExecutor(Node):
             gripper_joint_names=panda.gripper_joint_names(),
             open_gripper_joint_positions=panda.OPEN_GRIPPER_JOINT_POSITIONS,
             closed_gripper_joint_positions=panda.CLOSED_GRIPPER_JOINT_POSITIONS,
-            gripper_group_name=panda.MOVE_GROUP_GRIPPER,
+            gripper_group_name=gripper_group,
             callback_group=cb,
         )
         self.create_subscription(
