@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>fogaze_manip</name>
+  <version>0.1.0</version>
+  <description>
+    FoGaze manipulation stack — turns a triple-blink pick request into a
+    grasp: classifies objects as graspable (by distance + size) and drives a
+    robot arm in MoveIt 2 / Gazebo (with a mock executor for dependency-free
+    demos).
+  </description>
+  <maintainer email="user@example.com">user</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
+
+  <!-- Tier 2 (arm bring-up); install these to run the real sim, see README -->
+  <exec_depend>moveit</exec_depend>
+  <exec_depend>moveit_resources_panda_moveit_config</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,13 @@
+# Graspability + frame parameters for pickup_planner.
+# Tune per arm.  Defaults match a Franka Emika Panda hand.
+pickup_planner:
+  ros__parameters:
+    arm_base_frame: "panda_link0"
+    camera_frame: "camera_color_optical_frame"
+    # Set false to skip the camera->arm TF lookup (mock demos without a
+    # calibrated robot; pick poses are then published in the camera frame).
+    use_tf: false
+    min_reach_m: 0.20      # nearer than this is inside the arm/base
+    max_reach_m: 0.85      # farther than this cannot be reached
+    gripper_max_m: 0.08    # widest object the gripper can close on (Panda ~8cm)
+    min_size_m: 0.02       # smaller is treated as detection noise

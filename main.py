@@ -37,12 +37,157 @@ from modules.object_detector import ObjectDetector
 from modules.depth_estimator import DepthEstimator
 from modules.gui_overlay import GUIOverlay
 from modules.ui import draw_text_stroke
-from modules.ui import Theme, TopBar, GazeCursor, HUDInfo
+from modules.ui import Theme, TopBar, GazeCursor
 from modules.camera_calibrator import CameraCalibrator
+from modules.grasp import (
+    CameraIntrinsics, bbox_size_m, classify_graspable, project_bbox_to_3d,
+)
+
+# ── Optional ROS publishing (for Rviz) ───────────────────────────────
+_ros_node = None
+_ros_pub_markers = None
+_ros_pub_pickup = None
+_ros_pub_objects = None
+_ros_spin_thread = None
 
 
-class DoubleBlinkDetector:
-    def __init__(self, window=1.2):
+def _ros_init():
+    global _ros_node, _ros_pub_markers, _ros_pub_pickup, _ros_pub_objects
+    global _ros_spin_thread
+    try:
+        import rclpy
+        from visualization_msgs.msg import MarkerArray
+        from std_msgs.msg import String
+        import tf2_ros
+        from geometry_msgs.msg import TransformStamped
+
+        rclpy.init()
+        _ros_node = rclpy.create_node("fogaze_ros_bridge")
+        _ros_pub_markers = _ros_node.create_publisher(MarkerArray, "detections/markers", 1)
+        # Manipulation link (consumed by fogaze_manip/pickup_planner).
+        _ros_pub_pickup = _ros_node.create_publisher(String, "fogaze/pickup", 1)
+        _ros_pub_objects = _ros_node.create_publisher(String, "fogaze/objects", 1)
+
+        # Periodically publish map frame to /tf so rviz2 accepts it as fixed frame
+        tf_broadcaster = tf2_ros.TransformBroadcaster(_ros_node)
+        identity_tf = TransformStamped()
+        identity_tf.header.stamp = _ros_node.get_clock().now().to_msg()
+        identity_tf.header.frame_id = "map"
+        identity_tf.child_frame_id = "fogaze_base"  # different child so TF accepts it
+        identity_tf.transform.translation.x = 0.0
+        identity_tf.transform.translation.y = 0.0
+        identity_tf.transform.translation.z = 0.0
+        identity_tf.transform.rotation.w = 1.0
+
+        # Spin in background and republish TF periodically
+        import threading
+        def _spin_loop():
+            while rclpy.ok():
+                identity_tf.header.stamp = _ros_node.get_clock().now().to_msg()
+                tf_broadcaster.sendTransform(identity_tf)
+                rclpy.spin_once(_ros_node, timeout_sec=0.1)
+        _ros_spin_thread = threading.Thread(target=_spin_loop, daemon=True)
+        _ros_spin_thread.start()
+
+        print("[FoGaze] ROS bridge ready — publishing /detections/markers + TF map→fogaze_base")
+    except Exception as e:
+        print(f"[FoGaze] ROS not available: {e}")
+
+
+def _ros_publish_markers(frame, detections, depth_est):
+    global _ros_node, _ros_pub_markers
+    if _ros_pub_markers is None:
+        return
+    try:
+        from visualization_msgs.msg import Marker, MarkerArray
+        from std_msgs.msg import ColorRGBA
+        from builtin_interfaces.msg import Time
+        import numpy as np
+
+        now = _ros_node.get_clock().now().to_msg() if hasattr(_ros_node, 'get_clock') else Time()
+        h, w = frame.shape[:2]
+        FX, FY = 532.0, 532.0
+        CX, CY = w / 2.0, h / 2.0
+
+        arr = MarkerArray()
+        for i, det in enumerate(detections):
+            x1, y1, x2, y2 = det["bbox"]
+            d = depth_est.depth_at_bbox(x1, y1, x2, y2)
+            z_m = d / 100.0 if d is not None else 1.0
+            cx_d, cy_d = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            x3d = (cx_d - CX) * z_m / FX
+            y3d = (cy_d - CY) * z_m / FY
+
+            box = Marker()
+            box.header.stamp = now
+            box.header.frame_id = "map"
+            box.ns = "detections"
+            box.id = i * 2
+            box.type = Marker.CUBE
+            box.action = Marker.ADD
+            box.pose.position.x = x3d
+            box.pose.position.y = y3d
+            box.pose.position.z = z_m
+            w3d = abs(x2 - x1) * z_m / FX
+            h3d = abs(y2 - y1) * z_m / FY
+            box.scale.x = max(w3d, 0.02)
+            box.scale.y = max(h3d, 0.02)
+            box.scale.z = max(z_m * 0.1, 0.02)
+            box.color = ColorRGBA(r=0.2, g=0.6, b=1.0, a=0.35)
+            box.lifetime.sec = 1
+            arr.markers.append(box)
+
+            label = Marker()
+            label.header.stamp = now
+            label.header.frame_id = "map"
+            label.ns = "labels"
+            label.id = i * 2 + 1
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = x3d
+            label.pose.position.y = y3d
+            label.pose.position.z = z_m + 0.05
+            label.scale.z = 0.06
+            label.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+            label.text = f"{det['class_name']} {det['confidence']:.2f}"
+            label.lifetime.sec = 1
+            arr.markers.append(label)
+
+        _ros_pub_markers.publish(arr)
+    except Exception as e:
+        print(f"[FoGaze] ROS publish error: {e}")
+
+
+def _ros_publish_objects(objects, frame_id):
+    """Publish the per-frame object list (with graspability) as JSON."""
+    if _ros_pub_objects is None:
+        return
+    try:
+        import json
+        from std_msgs.msg import String
+        _ros_pub_objects.publish(String(
+            data=json.dumps({"frame_id": frame_id, "objects": objects})))
+    except Exception as e:
+        print(f"[FoGaze] ROS objects publish error: {e}")
+
+
+def _ros_publish_pickup(target, frame_id):
+    """Publish a single pick request (triggered by triple-blink) as JSON."""
+    if _ros_pub_pickup is None:
+        return
+    try:
+        import json
+        from std_msgs.msg import String
+        _ros_pub_pickup.publish(String(
+            data=json.dumps({"frame_id": frame_id, "target": target})))
+        print(f"[Pickup] -> ROS fogaze/pickup: {target.get('class')} "
+              f"graspable={target.get('graspable')} ({target.get('reason')})")
+    except Exception as e:
+        print(f"[FoGaze] ROS pickup publish error: {e}")
+
+
+class TripleBlinkDetector:
+    def __init__(self, window=1.5):
         self.window = window
         self._times = []
         self._was = False
@@ -55,7 +200,7 @@ class DoubleBlinkDetector:
             self._times.append(now)
             cutoff = now - self.window
             self._times = [t for t in self._times if t >= cutoff]
-            if len(self._times) >= 2:
+            if len(self._times) >= 3:
                 self._times = []
                 triggered = True
         self._was = blinking
@@ -161,71 +306,140 @@ def _scan_cameras(max_cam=10):
     return avail
 
 
+PANEL_W = 268  # left panel width (px)
+
+
+def _stat_row(label, value, value_rgb=(0.90, 0.91, 0.94)):
+    """One aligned 'Label    value' row inside the status card."""
+    imgui.text_colored(label, 0.50, 0.53, 0.60, 1.0)
+    imgui.same_line(96)
+    imgui.text_colored(str(value), *value_rgb, 1.0)
+
+
 def _draw_main_menu(gui, fps_val=0, show_depth=False,
                      zone_txt="--", focus_txt="--", depth_txt="--",
+                     tracker_txt="--", cal_status="--", rel_txt="--",
+                     gaze_txt="--", scene_txt="--",
                      cal_mode=None, cal_step=None, cal_progress=None,
                      face_tex_id=None, depth_tex_id=None,
                      eye_tex_id=None):
     """Left-side MainMenu panel. Returns action string or None."""
+    from modules.depth_estimator import OPTS, COLORMAPS
     flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
-             imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
-             imgui.WINDOW_NO_SCROLLBAR)
+             imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR)
     imgui.set_next_window_position(0, 0)
-    imgui.set_next_window_size(250, gui.height)
+    imgui.set_next_window_size(PANEL_W, gui.height)
     imgui.begin("##MainMenu", None, flags)
 
-    imgui.text_colored("FoGaze", 0.3, 0.8, 1.0, 1.0)
-    imgui.separator()
+    # ── Header ──────────────────────────────────────────────────────────
+    imgui.text_colored("FoGaze", 0.20, 0.78, 1.0, 1.0)
+    imgui.same_line()
+    imgui.text_colored("v3", 0.50, 0.53, 0.60, 1.0)
+    imgui.spacing()
 
     action = None
     if cal_mode is None:
-        imgui.text(f"FPS: {fps_val}")
-        imgui.separator()
-        if imgui.button("Re-calibrate Gaze", -1, 36):
+        # ── Live status card ────────────────────────────────────────────
+        fps_rgb = ((0.45, 0.85, 0.45) if fps_val >= 20 else
+                   (0.95, 0.75, 0.25) if fps_val >= 12 else
+                   (0.95, 0.40, 0.40))
+        cal_rgb = ((0.39, 0.78, 0.0) if cal_status == "CAL"
+                   else (1.0, 0.65, 0.0))
+        imgui.begin_child("##status", PANEL_W - 28, 196, border=True)
+        _stat_row("FPS", fps_val, fps_rgb)
+        _stat_row("Tracker", tracker_txt or "--")
+        _stat_row("Cal", cal_status or "--", cal_rgb)
+        _stat_row("Zone", zone_txt or "--")
+        _stat_row("Focus", focus_txt or "--", (0.20, 0.78, 1.0))
+        _stat_row("Relation", rel_txt or "--", (0.39, 0.78, 0.0))
+        _stat_row("Depth", depth_txt or "--", (0.20, 0.78, 1.0))
+        _stat_row("Gaze", gaze_txt or "--")
+        _stat_row("Camera", scene_txt or "--")
+        imgui.end_child()
+        imgui.spacing()
+
+        # ── Primary actions ─────────────────────────────────────────────
+        if imgui.button("Re-calibrate Gaze  (C)", -1, 38):
             action = 'gaze_cal'
-        if imgui.button("Calibrate Depth", -1, 36):
-            action = 'depth_cal'
-        if imgui.button("Calibrate Cameras", -1, 36):
+        if imgui.button("Calibrate Cameras  (V)", -1, 38):
             action = 'cam_cal'
+
         s = show_depth
-        _, s = imgui.checkbox("Depth Overlay", s)
+        _, s = imgui.checkbox("Depth overlay  (D)", s)
         if s != show_depth:
             action = ('toggle_depth', s)
-        imgui.separator()
-        if imgui.button("Quit", -1, 36):
-            action = 'quit'
-        imgui.separator()
-        imgui.text(f"Zone: {zone_txt}")
-        imgui.text(f"Focus: {focus_txt}")
-        imgui.text(f"Depth: {depth_txt}")
+
+        imgui.spacing()
+
+        # ── Depth settings (collapsed by default → clean view) ──────────
+        if imgui.collapsing_header("Depth settings")[0]:
+            changed, v = imgui.slider_int("Off X", OPTS["off_x"], -50, 50)
+            if changed:
+                OPTS["off_x"] = v
+            changed, v = imgui.slider_int("Off Y", OPTS["off_y"], -50, 50)
+            if changed:
+                OPTS["off_y"] = v
+            changed, v = imgui.slider_int("Min mm", OPTS["min_dist_mm"], 100, 1000)
+            if changed:
+                OPTS["min_dist_mm"] = v
+            changed, v = imgui.slider_int("Max mm", OPTS["max_dist_mm"], 500, 8000)
+            if changed:
+                OPTS["max_dist_mm"] = v
+            cmap_names = [f"cmap {i}" for i in range(len(COLORMAPS))]
+            _, idx = imgui.combo("Colormap", OPTS["cmap_idx"], cmap_names)
+            OPTS["cmap_idx"] = idx
+
+        # ── Help / shortcuts ────────────────────────────────────────────
+        if imgui.collapsing_header("Shortcuts")[0]:
+            imgui.text_colored("C", 0.20, 0.78, 1.0, 1.0)
+            imgui.same_line(40); imgui.text("Re-calibrate gaze")
+            imgui.text_colored("V", 0.20, 0.78, 1.0, 1.0)
+            imgui.same_line(40); imgui.text("Calibrate cameras")
+            imgui.text_colored("D", 0.20, 0.78, 1.0, 1.0)
+            imgui.same_line(40); imgui.text("Toggle depth")
+            imgui.text_colored("F", 0.20, 0.78, 1.0, 1.0)
+            imgui.same_line(40); imgui.text("Fullscreen")
+            imgui.text_colored("ESC", 0.20, 0.78, 1.0, 1.0)
+            imgui.same_line(40); imgui.text("Quit")
     else:
-        imgui.text_colored("Calibrating", 0.2, 1.0, 0.5, 1.0)
+        imgui.begin_child("##status", PANEL_W - 28, 90, border=True)
+        imgui.text_colored("Calibrating...", 0.20, 0.78, 1.0, 1.0)
         if cal_step:
             imgui.text(f"Step: {cal_step}")
         if cal_progress:
             imgui.text(cal_progress)
-        imgui.separator()
-        imgui.text_colored("ESC = Cancel", 0.8, 0.3, 0.3, 1.0)
+        imgui.end_child()
+        imgui.spacing()
+        imgui.text_colored("ESC = Cancel", 0.95, 0.40, 0.40, 1.0)
 
-    # Face camera preview at bottom of panel
-    pw, ph = 230, 172  # 4:3 fits 250-wide panel
+    # ── Camera previews ─────────────────────────────────────────────────
+    pw = PANEL_W - 28
+    ph = int(pw * 3 / 4)
     if face_tex_id is not None:
-        imgui.separator()
-        imgui.text_colored("FACE TRACK", 0.3, 1.0, 0.5, 1.0)
+        imgui.spacing()
+        imgui.text_colored("FACE TRACK", 0.50, 0.53, 0.60, 1.0)
         imgui.image(face_tex_id, pw, ph)
 
-    # Eye tracking preview below face
     if eye_tex_id is not None:
-        imgui.separator()
-        imgui.text_colored("EYE TRACK", 0.3, 1.0, 0.5, 1.0)
-        ew = min(pw, imgui.get_content_region_max()[0] - imgui.get_cursor_pos()[0])
-        imgui.image(eye_tex_id, ew, 60)
+        imgui.text_colored("EYE TRACK", 0.50, 0.53, 0.60, 1.0)
+        imgui.image(eye_tex_id, pw, 60)
 
-    # Depth colormap preview below face (only when toggled on)
     if show_depth and depth_tex_id is not None:
-        imgui.separator()
-        imgui.text_colored("DEPTH MAP", 0.3, 1.0, 0.5, 1.0)
+        imgui.text_colored("DEPTH MAP", 0.50, 0.53, 0.60, 1.0)
         imgui.image(depth_tex_id, pw, ph)
+
+    # ── Quit pinned to bottom, danger-styled ────────────────────────────
+    if cal_mode is None:
+        btn_h = 36
+        avail_y = imgui.get_content_region_available()[1]
+        if avail_y > btn_h + 8:
+            imgui.dummy(1, avail_y - btn_h - 4)
+        imgui.push_style_color(imgui.COLOR_BUTTON, 0.32, 0.12, 0.14, 1.0)
+        imgui.push_style_color(imgui.COLOR_BUTTON_HOVERED, 0.70, 0.20, 0.22, 1.0)
+        imgui.push_style_color(imgui.COLOR_BUTTON_ACTIVE, 0.90, 0.25, 0.27, 1.0)
+        if imgui.button("Quit", -1, btn_h):
+            action = 'quit'
+        imgui.pop_style_color(3)
 
     imgui.end()
     return action
@@ -239,22 +453,24 @@ def _draw_instructions(lines, gui_height):
              imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
              imgui.WINDOW_NO_SCROLLBAR)
     imgui.set_next_window_position(0, gui_height - h)
-    imgui.set_next_window_size(250, h)
+    imgui.set_next_window_size(PANEL_W, h)
     imgui.begin("##Instructions", None, flags)
     for line in lines:
         imgui.text_wrapped(line)
     imgui.end()
 
 
-def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
+def _calibrate_two_cam(gaze_estimator, cap_face, depth_estimator, gui,
                        capture_frames=250, grid_cols=3, grid_rows=3):
-    """Grid calibration rendered through GUIOverlay + ImGui panels."""
-    ret, tmp = cap_scene.read()
-    if not ret:
-        print("[FoGaze] Cannot read scene camera for calibration.")
+    """Grid calibration rendered through GUIOverlay + ImGui panels.
+    Scene feed comes from PrimeSense via depth_estimator.
+    """
+    scene, _ = depth_estimator.get_frame()
+    if scene is None:
+        print("[FoGaze] Cannot read PrimeSense for calibration.")
         return False
 
-    h_s, w_s = tmp.shape[:2]
+    h_s, w_s = scene.shape[:2]
     xs = np.linspace(int(w_s * 0.1), int(w_s * 0.9), grid_cols, dtype=int)
     ys = np.linspace(int(h_s * 0.1), int(h_s * 0.9), grid_rows, dtype=int)
     targets = [(int(x), int(y)) for y in ys for x in xs]
@@ -296,9 +512,10 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
 
     # ── Phase 1: Guide screen ─────────────────────────────────────────
     while True:
-        ret_s, frame_s = cap_scene.read()
-        if not ret_s:
+        scene, _ = depth_estimator.get_frame()
+        if scene is None:
             continue
+        frame_s = scene
         canvas = np.zeros((h_s, w_s, 3), dtype=np.uint8)
         for i, txt in enumerate(guide_items):
             cv2.putText(canvas, txt, (80, 50 + i * 32),
@@ -312,9 +529,12 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
     # ── Phase 2: Wait for face ────────────────────────────────────────
     fd_start = None
     while True:
-        ret_s, frame_s = cap_scene.read()
+        scene, _ = depth_estimator.get_frame()
+        if scene is None:
+            continue
+        frame_s = scene
         ret_f, frame_f = cap_face.read()
-        if not ret_s or not ret_f:
+        if not ret_f:
             continue
         frame_face = cv2.flip(frame_f, 1)
         f, blink = gaze_estimator.extract_features(frame_face)
@@ -349,9 +569,12 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
     # ── Phase 3: Grid capture ─────────────────────────────────────────
     for idx, (tx, ty) in enumerate(targets):
         while True:
-            ret_s, frame_s = cap_scene.read()
+            scene, _ = depth_estimator.get_frame()
+            if scene is None:
+                continue
+            frame_s = scene
             ret_f, frame_f = cap_face.read()
-            if not ret_s or not ret_f:
+            if not ret_f:
                 continue
             frame_face = cv2.flip(frame_f, 1)
             canvas = frame_s.copy()
@@ -391,9 +614,9 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
                         collected.append([tx, ty, ft])
                 # Green flash + beep ×2
                 for _ in range(2):
-                    ret_s2, fb = cap_scene.read()
-                    if ret_s2:
-                        fb2 = fb.copy()
+                    fb_scene, _ = depth_estimator.get_frame()
+                    if fb_scene is not None:
+                        fb2 = fb_scene.copy()
                         cv2.rectangle(fb2, (0, 0), (w_s, h_s), (0, 230, 0), -1)
                         cv2.putText(fb2, "Done!", (w_s // 2 - 80, h_s // 2),
                                     cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
@@ -428,193 +651,14 @@ def _calibrate_two_cam(gaze_estimator, cap_face, cap_scene, gui,
     return True
 
 
-def _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
-                     cap_face=None):
-    """Interactive depth calibration rendered through GUIOverlay + ImGui.
-    Uses a single 1m reference point: scale = 1.0 / depth_m.
-    """
-    distances = [100]
-    samples = []
-    font = cv2.FONT_HERSHEY_SIMPLEX
-
-    guide = [
-        "===== Depth Calibration =====",
-        "",
-        "Place your hand or object 1 meter (100cm) away.",
-        "手や物体を1メートル(100cm)の距離に置いてください。",
-        "",
-        "Make sure the object is centered in the crosshair.",
-        "十字線の中央に物体が来るようにしてください。",
-        "",
-        "Press ENTER to capture",
-        "ENTERで撮影",
-        "",
-        "ESC to cancel",
-        "ESC=キャンセル",
-        "",
-        "Press ENTER to begin",
-    ]
-
-    def _render_frame(canvas, face_disp, cal_step, cal_progress, instructions):
-        gui.update_scene_texture(canvas)
-        if face_disp is not None:
-            gui.update_face_texture(face_disp)
-        gui.begin_frame()
-        _draw_main_menu(gui, cal_mode='calibrating',
-                        cal_step=cal_step, cal_progress=cal_progress,
-                        face_tex_id=gui.face_texture_id,
-                        depth_tex_id=gui.depth_texture_id)
-        _draw_instructions(instructions, gui.height)
-        gui.render()
-
-    # ── Phase 1: Guide screen ─────────────────────────────────────────
-    while True:
-        canvas = np.zeros((sh, sw, 3), dtype=np.uint8)
-        for i, txt in enumerate(guide):
-            cv2.putText(canvas, txt, (80, 50 + i * 34),
-                        font, 0.9, (200, 200, 200), 2)
-        _render_frame(canvas, None, "Guide", "", guide)
-        if gui.was_key_pressed(glfw.KEY_ENTER):
-            break
-        if gui.was_key_pressed(glfw.KEY_ESCAPE):
-            return False
-
-    # ── Phase 2: Capture each distance ────────────────────────────────
-    for i, dist in enumerate(distances):
-        while True:
-            ret, frame = cap_scene.read()
-            if not ret:
-                continue
-            fh, fw = frame.shape[:2]
-            depth_map = depth_estimator.estimate(frame)
-
-            canvas = frame.copy()
-            cv2.putText(canvas, "Depth Calibration  |  1 meter",
-                        (50, 50), font, 1.2, (0, 255, 255), 3)
-            cv2.putText(canvas, "Place object/hand 1m away, centered in crosshair, then press ENTER",
-                        (50, 100), font, 0.8, (220, 220, 220), 2)
-
-            # Crosshair
-            cx, cy = fw // 2, fh // 2
-            r = 25
-            sample_r = 50
-            cv2.line(canvas, (0, cy), (fw, cy), (0, 255, 0), 1)
-            cv2.line(canvas, (cx, 0), (cx, fh), (0, 255, 0), 1)
-            gap, L = 15, 30
-            for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
-                x0, y0 = cx + dx * gap, cy + dy * gap
-                cv2.line(canvas, (x0, y0), (x0 + dx * L, y0), (0, 255, 0), 2)
-                cv2.line(canvas, (x0, y0), (x0, y0 + dy * L), (0, 255, 0), 2)
-            cv2.rectangle(canvas, (cx - r, cy - r), (cx + r, cy + r),
-                          (0, 255, 0), 1)
-            cv2.circle(canvas, (cx, cy), 3, (0, 255, 0), -1)
-
-            # Depth PIP
-            live_m = None
-            if depth_map is not None:
-                depth_color = depth_estimator.colormap(depth_map)
-                pip_h, pip_w = fh // 4, fw // 4
-                depth_small = cv2.resize(depth_color, (pip_w, pip_h))
-                x_off, y_off = fw - pip_w - 10, fh - pip_h - 10
-                canvas[y_off:y_off + pip_h, x_off:x_off + pip_w] = depth_small
-                freshness = depth_estimator.depth_freshness
-                label = "DEPTH (old)" if freshness > 2.0 else "DEPTH"
-                cv2.putText(canvas, label, (x_off, y_off - 5),
-                            font, 0.5, (0, 0, 255) if freshness > 2.0 else (0, 255, 0), 1)
-                center_roi = depth_map[cy - sample_r:cy + sample_r, cx - sample_r:cx + sample_r]
-                if center_roi.size > 0:
-                    avg = float(np.median(center_roi))
-                    live_m = avg
-                    cv2.putText(canvas, f"{avg:.2f}m",
-                                (x_off, y_off + pip_h + 20),
-                                font, 0.6, (0, 255, 255), 2)
-
-            face_disp = None
-            if cap_face is not None:
-                ret_f, ff = cap_face.read()
-                if ret_f:
-                    face_disp = cv2.flip(ff, 1)
-
-            instructions = [
-                "Place hand/object 1 meter away",
-                "手や物体を1mの距離に置いてください",
-                "",
-                "Center it in the crosshair",
-                "十字線の中央に合わせてください",
-                "",
-                "ENTER = capture    ESC = cancel",
-            ]
-
-            _render_frame(canvas, face_disp, "Depth Calibration",
-                          "", instructions)
-
-            if gui.was_key_pressed(glfw.KEY_ESCAPE):
-                return False
-
-            if gui.was_key_pressed(glfw.KEY_ENTER):
-                ret, frame = cap_scene.read()
-                if not ret:
-                    continue
-                depth_map = depth_estimator.estimate(frame)
-                if depth_map is None:
-                    print("[CalibrateDepth] Depth not ready, waiting...")
-                    for _ in range(60):
-                        time.sleep(0.04)
-                        depth_map = depth_estimator.estimate(frame)
-                        if depth_map is not None:
-                            break
-                if depth_map is None:
-                    continue
-                center_roi = depth_map[cy - sample_r:cy + sample_r, cx - sample_r:cx + sample_r]
-                if center_roi.size == 0:
-                    continue
-                avg_depth = float(np.median(center_roi))
-                scale = 1.0 / avg_depth
-                samples.append((dist, scale))
-                print(f"[CalibrateDepth] 1m -> {avg_depth:.3f}m, scale={scale:.4f}")
-
-                # Green flash
-                fb = frame.copy()
-                cv2.rectangle(fb, (0, 0), (fw, fh), (0, 180, 0), -1)
-                cv2.putText(fb, f"{dist}cm captured!",
-                            ((fw - 250) // 2, (fh + 30) // 2),
-                            font, 1.5, (255, 255, 255), 3)
-                gui.update_scene_texture(fb)
-                gui.begin_frame()
-                _draw_main_menu(gui, cal_mode='calibrating',
-                                cal_step="Saving...", cal_progress="",
-                                face_tex_id=gui.face_texture_id,
-                                depth_tex_id=gui.depth_texture_id)
-                gui.render()
-                time.sleep(0.4)
-                break
-
-    if len(samples) < 1:
-        print("[CalibrateDepth] No sample captured.")
-        return False
-
-    # Single-point calibration: scale = 1.0 / depth_m
-    scale = samples[0][1]
-    depth_estimator.save_cal(scale)
-    print(f"[CalibrateDepth] 1m -> scale={scale:.4f}")
-    return True
-
-
 def _calibrate_cameras(calib_face: CameraCalibrator,
-                       calib_scene: CameraCalibrator,
-                       cap_face, cap_scene, gui):
-    """Interactive camera calibration using chessboard pattern.
-
-    The user points a printed chessboard (9x6 internal corners) at
-    each camera from various angles and presses ENTER to capture.
-    10+ good samples per camera are needed.
-    """
+                       cap_face, depth_estimator, gui):
+    """Calibrate face camera lens distortion using chessboard pattern."""
     import cv2 as _cv2
     font = _cv2.FONT_HERSHEY_SIMPLEX
 
     for cam_name, cap, calib in [
         ("FACE CAMERA", cap_face, calib_face),
-        ("SCENE CAMERA", cap_scene, calib_scene),
     ]:
         frames = []
         print(f"[CalibrateCameras] === {cam_name} ===")
@@ -624,59 +668,49 @@ def _calibrate_cameras(calib_face: CameraCalibrator,
             f"Calibrating {cam_name}",
             "",
             "Show a printed chessboard (9x6 internal corners)",
-            "(9x6 のチェスボードをカメラに映してください)",
             "",
             "Move it at different angles and positions",
-            "角度や位置を変えてください",
             "",
             f"Samples: 0/10  (need >= 10)",
             "",
-            "ENTER = capture    ESC = skip camera",
+            "ENTER = capture    ESC = skip",
         ]
         while True:
             ret, frame = cap.read()
             if not ret:
                 continue
-            frame = _cv2.flip(frame, 1) if cam_name == "FACE CAMERA" else frame
             gray = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
             ret_cb, corners = _cv2.findChessboardCorners(
                 gray, CameraCalibrator.CHESSBOARD, None
             )
-
             display = frame.copy()
             if ret_cb:
                 _cv2.drawChessboardCorners(display,
                                            CameraCalibrator.CHESSBOARD,
                                            corners, ret_cb)
-
             h, w = frame.shape[:2]
             _cv2.putText(display, f"Samples: {len(frames)}/10",
                          (30, h - 30), font, 0.8,
                          (0, 255, 0) if len(frames) >= 10 else (0, 255, 255), 2)
 
-            face_disp = None
-            if cam_name == "SCENE CAMERA" and cap_face is not None:
-                rf, ff = cap_face.read()
-                if rf:
-                    face_disp = _cv2.flip(ff, 1)
-
             guide[6] = f"Samples: {len(frames)}/10  (need >= 10)"
-            instructions = guide
-            if cam_name == "FACE CAMERA":
-                gui.update_face_texture(display)
-            gui.update_scene_texture(display)
-            if face_disp is not None:
-                gui.update_face_texture(face_disp)
+
+            # Also show PrimeSense scene
+            scene, _ = depth_estimator.get_frame()
+            if scene is not None:
+                gui.update_scene_texture(scene)
+
+            gui.update_face_texture(display)
             gui.begin_frame()
             flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
                      imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_TITLE_BAR |
                      imgui.WINDOW_NO_SCROLLBAR)
             imgui.set_next_window_position(0, 0)
-            imgui.set_next_window_size(250, gui.height)
+            imgui.set_next_window_size(PANEL_W, gui.height)
             imgui.begin("##CalibCam", None, flags)
-            imgui.text_colored("Camera Calibration", 0.3, 0.8, 1.0, 1.0)
+            imgui.text_colored("Camera Calibration", 0.20, 0.78, 1.0, 1.0)
             imgui.separator()
-            for line in instructions:
+            for line in guide:
                 imgui.text_wrapped(line)
             imgui.separator()
             imgui.text_colored("ENTER = capture    ESC = skip",
@@ -698,26 +732,21 @@ def _calibrate_cameras(calib_face: CameraCalibrator,
             ok = calib.calibrate(frames, w, h)
             if ok:
                 print(f"[CalibrateCameras] {cam_name}: calibration successful")
-                ret, fb = cap_scene.read()
+                ret, fb = cap.read()
                 if ret:
-                    fb = _cv2.flip(fb, 1) if cam_name == "FACE CAMERA" else fb
                     _cv2.putText(fb, f"{cam_name} calibrated!", (50, 50),
                                 font, 1.2, (0, 255, 0), 3)
-                    gui.update_scene_texture(fb)
+                    gui.update_face_texture(fb)
             else:
                 print(f"[CalibrateCameras] {cam_name}: calibration failed")
         else:
             print(f"[CalibrateCameras] {cam_name}: skipped")
 
-    # Re-init undistort maps for current resolution
+    # Re-init face undistort maps
     ret, ff = cap_face.read()
     if ret:
         hf, wf = ff.shape[:2]
         calib_face._ensure_maps(wf, hf)
-    ret, sf = cap_scene.read()
-    if ret:
-        hs, ws = sf.shape[:2]
-        calib_scene._ensure_maps(ws, hs)
 
     print("[CalibrateCameras] Done.")
     return True
@@ -849,10 +878,13 @@ def main():
                         help="YOLO inference every N frames")
     parser.add_argument("--imgsz", type=int, default=320,
                         help="YOLO inference size")
-    parser.add_argument("--reset-depth-cal", action="store_true",
-                        help="Delete depth calibration and exit")
     parser.add_argument("--headless", action="store_true",
                         help="Run without display")
+    parser.add_argument("--ros", action="store_true",
+                        help="Publish detections + triple-blink pickups to "
+                             "ROS 2 (fogaze/objects, fogaze/pickup)")
+    parser.add_argument("--camera-frame", default="camera_color_optical_frame",
+                        help="ROS frame_id for published object poses")
 
     args = parser.parse_args()
 
@@ -864,36 +896,33 @@ def main():
     avail = _scan_cameras()
     cv2.destroyAllWindows()
     gui = GUIOverlay(sw, sh)
+    # Reserve the left strip for the side panel so the scene view is
+    # rendered to the right of it instead of being covered by it.
+    gui.margin_left = PANEL_W
 
-    # Camera selection dialog
+    # Only need face camera; PrimeSense provides scene color + depth
     face_cam_idx = 0
-    scene_cam_idx = 1 if len(avail) > 1 else 0
     cam_selected = False
     while not cam_selected:
         gui.begin_frame()
-        imgui.set_next_window_size(500, 300, imgui.ONCE)
-        imgui.set_next_window_position(gui.width//2 - 250, gui.height//2 - 150,
+        imgui.set_next_window_size(400, 220, imgui.ONCE)
+        imgui.set_next_window_position(gui.width//2 - 200, gui.height//2 - 110,
                                         imgui.ONCE)
         imgui.begin("Camera Selection", None,
                     imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE)
-        imgui.text("Select Face Camera and Scene Camera")
-        imgui.separator()
-        imgui.text("")
+        imgui.text_colored("FoGaze", 0.20, 0.78, 1.0, 1.0)
+        imgui.text("Select the face camera.")
+        imgui.text_colored("PrimeSense provides the scene view.",
+                           0.50, 0.53, 0.60, 1.0)
+        imgui.spacing()
         camera_names = [f"Camera {i}" for i in avail]
         _, face_cam_idx = imgui.combo("Face Camera", face_cam_idx, camera_names)
-        _, scene_cam_idx = imgui.combo("Scene Camera", scene_cam_idx, camera_names)
-        imgui.text("")
-        imgui.separator()
-        imgui.text(f"Selected: Face=Camera {avail[face_cam_idx]}, "
-                   f"Scene=Camera {avail[scene_cam_idx]}")
-        if imgui.button("Start", 200, 50):
-            if face_cam_idx != scene_cam_idx or len(avail) == 1:
-                cam_selected = True
-            else:
-                # Force different cameras if possible
-                if len(avail) > 1:
-                    # Swap scene to next available
-                    scene_cam_idx = (face_cam_idx + 1) % len(avail)
+        imgui.spacing()
+        imgui.text_colored(f"-> Camera {avail[face_cam_idx]} + PrimeSense",
+                           0.45, 0.85, 0.45, 1.0)
+        imgui.spacing()
+        if imgui.button("Start", -1, 46):
+            cam_selected = True
         imgui.end()
         gui.render()
         if gui.was_key_pressed(glfw.KEY_ESCAPE):
@@ -902,8 +931,7 @@ def main():
             return
 
     face_cam = avail[face_cam_idx]
-    scene_cam = avail[scene_cam_idx]
-    print(f"[FoGaze] Face cam={face_cam}  Scene cam={scene_cam}")
+    print(f"[FoGaze] Face cam={face_cam}  Scene=PrimeSense (built-in)")
 
     # gui stays open for calibration + main loop
     model_path = args.model_file or DEFAULT_MODEL_PATH
@@ -916,12 +944,6 @@ def main():
             print(f"[FoGaze] Deleted {model_path}")
         else:
             print("[FoGaze] No model file found.")
-        return
-
-    if args.reset_depth_cal:
-        gui.close()
-        de = DepthEstimator(device="cuda", depth_size=384)
-        de.reset_cal()
         return
 
     # ── GazeEstimator ─────────────────────────────────────────────────
@@ -940,19 +962,15 @@ def main():
         print("[FoGaze] No valid model — starting calibration")
 
         cap_tmp_face = cv2.VideoCapture(face_cam)
-        cap_tmp_scene = cv2.VideoCapture(scene_cam)
-        if not cap_tmp_face.isOpened() or not cap_tmp_scene.isOpened():
-            raise RuntimeError("Cannot open cameras for calibration")
+        if not cap_tmp_face.isOpened():
+            raise RuntimeError("Cannot open face camera for calibration")
         cap_tmp_face.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap_tmp_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap_tmp_scene.set(cv2.CAP_PROP_FRAME_WIDTH, sw)
-        cap_tmp_scene.set(cv2.CAP_PROP_FRAME_HEIGHT, sh)
 
         ok = _calibrate_two_cam(
-            gaze_estimator, cap_tmp_face, cap_tmp_scene, gui,
+            gaze_estimator, cap_tmp_face, depth_estimator, gui,
         )
         cap_tmp_face.release()
-        cap_tmp_scene.release()
 
         if not ok:
             print("[FoGaze] Calibration failed or was cancelled.")
@@ -1004,27 +1022,26 @@ def main():
 
     # ── Open cameras ──────────────────────────────────────────────────────
     cap_face = cv2.VideoCapture(face_cam)
-    cap_scene = cv2.VideoCapture(scene_cam)
 
     if not cap_face.isOpened():
         raise RuntimeError(f"Cannot open face camera {face_cam}")
-    if not cap_scene.isOpened():
-        raise RuntimeError(f"Cannot open scene camera {scene_cam}")
 
     cap_face.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    cap_scene.set(cv2.CAP_PROP_FRAME_WIDTH, sw)
-    cap_scene.set(cv2.CAP_PROP_FRAME_HEIGHT, sh)
 
     for _ in range(10):
         cap_face.read()
-        cap_scene.read()
 
-    # ── Camera calibrators (lens distortion correction) ──────────────
+    # ── PrimeSense depth camera (also provides scene color) ──────────
+    depth_estimator = DepthEstimator()
+    # Warm up
+    for _ in range(30):
+        _, _ = depth_estimator.get_frame()
+
+    # ── Camera calibrator (face camera lens distortion) ──────────────
     calib_face = CameraCalibrator(face_cam)
-    calib_scene = CameraCalibrator(scene_cam)
 
-    # ── Object detector (scene camera) ────────────────────────────────
+    # ── Object detector (scene camera via PrimeSense color) ──────────
     detector = ObjectDetector(
         model_path=args.yolo_model,
         confidence=args.confidence,
@@ -1032,22 +1049,19 @@ def main():
     )
     detector.set_detection_interval(args.detection_interval)
 
-    # ── Depth estimator ───────────────────────────────────────────────
-    depth_estimator = DepthEstimator(device="cuda", depth_size=384,
-                                     min_interval=1.5)
+    # ── PrimeSense depth estimator (also provides scene color stream) ──
     show_depth = False
 
     # ── UI components ─────────────────────────────────────────────────
-    topbar = TopBar()
+    topbar = TopBar()  # kept for toast()/set_fps() calls; bar no longer drawn
     cursor = GazeCursor()
-    hud = HUDInfo()
 
     # ── State ─────────────────────────────────────────────────────────
     gaze_active = False
     focused = None
     cal_notified = False
 
-    blink_detector = DoubleBlinkDetector()
+    blink_detector = TripleBlinkDetector()
     speech = SpeechOutput()
     last_valid_gx = sw // 2
     last_valid_gy = sh // 2
@@ -1066,22 +1080,25 @@ def main():
     # gui already open from camera selection
     _trigger_quit = False
     _trigger_recal = False
-    _trigger_depth_cal = False
     _trigger_cam_cal = False
+
+    # Optional ROS bridge for Rviz
+    _ros_init()
 
     try:
         while True:
             # ── Read cameras ──────────────────────────────────────────
             ret_face, frame_face = cap_face.read()
-            ret_scene, frame_scene = cap_scene.read()
-            if not ret_face or not ret_scene:
+            scene_frame, depth_map = depth_estimator.get_frame()
+            ret_scene = scene_frame is not None
+            frame_scene = scene_frame if ret_scene else np.zeros((sh, sw, 3), dtype=np.uint8)
+            if not ret_face:
                 break
 
             frame_face = cv2.flip(frame_face, 1)
 
-            # Undistort both feeds (auto-defaults if no chessboard cal)
+            # Undistort face feed (auto-defaults if no chessboard cal)
             frame_face = calib_face.undistort(frame_face)
-            frame_scene = calib_scene.undistort(frame_scene)
 
             h_scene, w_scene = frame_scene.shape[:2]
 
@@ -1122,8 +1139,10 @@ def main():
             # ── Object detection (scene camera) ───────────────────────
             detections = detector.detect(frame_scene)
 
-            # ── Depth estimation (async, non-blocking) ──────────────────
-            depth_map = depth_estimator.estimate(frame_scene)
+            # ── Publish YOLO markers to ROS (for Rviz) ─────────────
+            _ros_publish_markers(frame_scene, detections, depth_estimator)
+
+            # ── Depth (already from PrimeSense get_frame) ─────────────
             focused_depth = None
             focused_depth_cm = None
 
@@ -1160,7 +1179,7 @@ def main():
                         focused_rel = (rel, detections[i])
                         break
 
-            # ── Double-blink → speech (zone + relation) ───────────────
+            # ── Triple-blink → speech + pickup signal ────────────────
             if blink_detector.update(blink_detected, time.time()):
                 zi, _ = _zone_for(gx_scene, gy_scene, w_scene, h_scene)
                 phrase = ZONE_PHRASES[zi]
@@ -1174,6 +1193,28 @@ def main():
                             f"{focused_rel[1]['class_name']} {phrase}")
                     else:
                         speech.speak(f"{name} {phrase}")
+                    print(f"[Pickup] TRIGGER: {focused['class_name']} at "
+                          f"depth={focused_depth_cm:.0f}cm" if focused_depth_cm
+                          else f"[Pickup] TRIGGER: {focused['class_name']}")
+                    # ── Dispatch the pick request to the manipulation stack ──
+                    if args.ros:
+                        intr = CameraIntrinsics(cx=w_scene / 2.0,
+                                                cy=h_scene / 2.0)
+                        if focused_depth_cm is not None:
+                            z_m = focused_depth_cm / 100.0
+                            size_wh = bbox_size_m(focused["bbox"], z_m, intr)
+                            pose = project_bbox_to_3d(focused["bbox"], z_m, intr)
+                            graspable, reason = classify_graspable(z_m, size_wh)
+                        else:
+                            z_m = size_wh = pose = None
+                            graspable, reason = False, "no-depth"
+                        _ros_publish_pickup({
+                            "class": focused["class_name"],
+                            "confidence": focused["confidence"],
+                            "pose": list(pose) if pose else None,
+                            "size": list(size_wh) if size_wh else None,
+                            "graspable": graspable, "reason": reason,
+                        }, args.camera_frame)
                 else:
                     speech.speak(phrase)
 
@@ -1219,23 +1260,68 @@ def main():
                           Theme.BG_PRIMARY, -1)
             cv2.addWeighted(overlay, 0.12, canvas, 0.88, 0, canvas)
 
-            # YOLO bounding boxes with depth labels
+            # Depth colormap overlay (when toggled)
+            if show_depth and depth_map is not None:
+                depth_color = depth_estimator.colormap(depth_map)
+                depth_resized = cv2.resize(depth_color, (w_scene, h_scene))
+                cv2.addWeighted(depth_resized, 0.5, canvas, 0.5, 0, canvas)
+
+            # YOLO bounding boxes with depth labels + graspability
+            grasp_intr = CameraIntrinsics(cx=w_scene / 2.0, cy=h_scene / 2.0)
+            ros_objects = []
             for det in detections:
                 x1, y1, x2, y2 = det["bbox"]
                 is_focused = (focused is not None and focused is det)
-                color = Theme.ACCENT_GREEN if is_focused else Theme.ACCENT_CYAN
-                thickness = 3 if is_focused else 2
-                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, thickness)
                 # Depth distance for this detection
                 det_depth = depth_estimator.depth_at_bbox(x1, y1, x2, y2)
                 det_depth_cm = depth_estimator.depth_to_distance_cm(det_depth) if det_depth is not None else None
+
+                # ── Graspability (by distance + real-world size) ──────────
+                if det_depth_cm is not None:
+                    z_m = det_depth_cm / 100.0
+                    size_wh = bbox_size_m(det["bbox"], z_m, grasp_intr)
+                    pose = project_bbox_to_3d(det["bbox"], z_m, grasp_intr)
+                    graspable, reason = classify_graspable(z_m, size_wh)
+                else:
+                    z_m = size_wh = pose = None
+                    graspable, reason = False, "no-depth"
+                det["_grasp"] = {
+                    "class": det["class_name"], "confidence": det["confidence"],
+                    "pose": list(pose) if pose else None,
+                    "size": list(size_wh) if size_wh else None,
+                    "graspable": graspable, "reason": reason,
+                }
+                ros_objects.append(det["_grasp"])
+
+                # Colour encodes graspability; focus adds thickness.
+                if det_depth_cm is None:
+                    color = Theme.ACCENT_CYAN          # unknown depth
+                elif graspable:
+                    color = Theme.ACCENT_GREEN         # can pick up
+                else:
+                    color = Theme.ACCENT_RED           # cannot pick up
+                thickness = 3 if is_focused else 2
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, thickness)
+
                 det_label = f"{det['class_name']} {det['confidence']:.2f}"
                 if det_depth_cm is not None:
                     det_label += f"  {det_depth_cm/100:.1f}m"
+                det_label += "  [grab]" if graspable else f"  [{reason}]"
+                # Clamp label inside the canvas so it never spills off-screen
+                (lbl_w, lbl_h), lbl_base = cv2.getTextSize(
+                    det_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                lbl_x = min(max(x1, 0), w_scene - lbl_w)
+                lbl_y = y1 - 8
+                if lbl_y - lbl_h < 0:  # off the top → draw below the box's top edge
+                    lbl_y = y1 + lbl_h + 8
+                lbl_y = min(lbl_y, h_scene - lbl_base)
                 draw_text_stroke(
                     canvas, det_label,
-                    (x1, y1 - 8), scale=0.5, color=color,
+                    (lbl_x, lbl_y), scale=0.5, color=color,
                 )
+
+            if args.ros:
+                _ros_publish_objects(ros_objects, args.camera_frame)
 
             # 3×3 zone grid (center zone larger)
             zi, (c1, c2, r1, r2) = _zone_for(
@@ -1270,15 +1356,11 @@ def main():
             # Gaze cursor
             cursor.draw(canvas)
 
-            # Top bar
-            topbar.draw(canvas, w_scene)
-
             # Calibration notification
             if _is_trained(gaze_estimator.model) and not cal_notified:
-                topbar.toast("Calibration ready", Theme.ACCENT_GREEN)
                 cal_notified = True
 
-            # HUD
+            # HUD values (rendered in the left panel, not on the scene canvas)
             cal_status = "CAL" if _is_trained(gaze_estimator.model) else "UNCAL"
             zi, _ = _zone_for(gx_scene, gy_scene, w_scene, h_scene)
             fname = (focused['class_name'] if focused['confidence'] >= THING_THRESHOLD
@@ -1288,28 +1370,15 @@ def main():
                        ) if focused_rel else "--"
             depth_txt = (f"{int(focused_depth_cm)}cm"
                          if focused_depth_cm is not None else "--")
-            hud.draw(canvas, [
-                (f"Face cam:{face_cam}  Scene cam:{scene_cam}",
-                 Theme.ACCENT_CYAN),
-                (f"EyeTrax {args.model.upper()} | {args.filter.upper()} | {cal_status}",
-                 Theme.ACCENT_GREEN if cal_status == "CAL"
-                 else Theme.ACCENT_ORANGE),
-                (f"Zone: {ZONE_PHRASES[zi]}",
-                 Theme.ACCENT_CYAN),
-                (f"Relation: {rel_txt}",
-                 Theme.ACCENT_GREEN if focused_rel else Theme.TEXT_DIM),
-                (f"Focus: {fname}",
-                 Theme.ACCENT_GREEN if focused else Theme.TEXT_DIM),
-                (f"Depth: {depth_txt}",
-                 Theme.ACCENT_CYAN if focused_depth_cm is not None else Theme.TEXT_DIM),
-                (f"Gaze: ({gx_scene}, {gy_scene})", Theme.TEXT_DIM),
-            ])
+            tracker_txt = f"{args.model.upper()} | {args.filter.upper()}"
+            gaze_txt = f"({gx_scene}, {gy_scene})"
+            scene_txt = f"Scene:PrimeSense  Face:{face_cam}"
 
             # Help hint
             if time.time() - help_t < 5:
                 draw_text_stroke(
                     canvas,
-                    "ESC: quit  |  c: re-calibrate  |  v: cal cameras  |  f: fullscreen  |  d: depth",
+                    "ESC: quit  |  c: re-calibrate  |  v: cal cameras  |  d: depth",
                     (w_scene // 2 - 250, h_scene - 40),
                     scale=0.45, color=Theme.TEXT_DIM,
                 )
@@ -1330,6 +1399,8 @@ def main():
                 action = _draw_main_menu(
                     gui, fps_val, show_depth,
                     ZONE_PHRASES[zi], fname, depth_txt,
+                    tracker_txt=tracker_txt, cal_status=cal_status,
+                    rel_txt=rel_txt, gaze_txt=gaze_txt, scene_txt=scene_txt,
                     face_tex_id=gui.face_texture_id,
                     depth_tex_id=gui.depth_texture_id,
                     eye_tex_id=gui.eye_texture_id,
@@ -1338,8 +1409,6 @@ def main():
                     _trigger_quit = True
                 elif action == 'gaze_cal':
                     _trigger_recal = True
-                elif action == 'depth_cal':
-                    _trigger_depth_cal = True
                 elif action == 'cam_cal':
                     _trigger_cam_cal = True
                 elif isinstance(action, tuple) and action[0] == 'toggle_depth':
@@ -1355,21 +1424,17 @@ def main():
             if gui.was_key_pressed(glfw.KEY_C) or _trigger_recal:
                 print("[FoGaze] Re-calibrating gaze...")
                 cap_face.release()
-                cap_scene.release()
 
                 cap_re_face = cv2.VideoCapture(face_cam)
-                cap_re_scene = cv2.VideoCapture(scene_cam)
-                if not cap_re_face.isOpened() or not cap_re_scene.isOpened():
+                if not cap_re_face.isOpened():
                     print("[FoGaze] Failed to open camera for re-calibration.")
                     break
                 cap_re_face.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 cap_re_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                cap_re_scene.set(cv2.CAP_PROP_FRAME_WIDTH, sw)
-                cap_re_scene.set(cv2.CAP_PROP_FRAME_HEIGHT, sh)
 
                 try:
                     ok = _calibrate_two_cam(
-                        gaze_estimator, cap_re_face, cap_re_scene, gui,
+                        gaze_estimator, cap_re_face, depth_estimator, gui,
                     )
                     if ok:
                         gaze_estimator.save_model(model_path)
@@ -1386,18 +1451,14 @@ def main():
                     topbar.toast("Calibration failed", Theme.ACCENT_RED)
 
                 cap_re_face.release()
-                cap_re_scene.release()
 
-                # Re-open main cameras
+                # Re-open main face camera
                 cap_face = cv2.VideoCapture(face_cam)
-                cap_scene = cv2.VideoCapture(scene_cam)
-                if not cap_face.isOpened() or not cap_scene.isOpened():
+                if not cap_face.isOpened():
                     print("[FoGaze] Failed to re-open camera.")
                     break
                 cap_face.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 cap_face.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                cap_scene.set(cv2.CAP_PROP_FRAME_WIDTH, sw)
-                cap_scene.set(cv2.CAP_PROP_FRAME_HEIGHT, sh)
 
             elif gui.was_key_pressed(glfw.KEY_D):
                 show_depth = not show_depth
@@ -1406,36 +1467,35 @@ def main():
                     Theme.ACCENT_GREEN if show_depth else Theme.ACCENT_ORANGE,
                 )
 
-            elif gui.was_key_pressed(glfw.KEY_P) or _trigger_depth_cal:
-                topbar.toast("Depth calibration...", Theme.ACCENT_CYAN)
-                ok = _calibrate_depth(depth_estimator, cap_scene, gui, sw, sh,
-                                      cap_face=cap_face)
-                if ok:
-                    topbar.toast("Depth calibrated!", Theme.ACCENT_GREEN)
-                else:
-                    topbar.toast("Depth cal. cancelled", Theme.ACCENT_ORANGE)
-
             elif gui.was_key_pressed(glfw.KEY_V) or _trigger_cam_cal:
                 topbar.toast("Camera calibration...", Theme.ACCENT_CYAN)
-                _calibrate_cameras(calib_face, calib_scene,
-                                   cap_face, cap_scene, gui)
+                _calibrate_cameras(calib_face,
+                                   cap_face, depth_estimator, gui)
                 topbar.toast("Camera cal. done", Theme.ACCENT_GREEN)
 
             _trigger_quit = False
             _trigger_recal = False
-            _trigger_depth_cal = False
             _trigger_cam_cal = False
 
     except KeyboardInterrupt:
         print("\n[FoGaze] Interrupted.")
     finally:
         cap_face.release()
-        cap_scene.release()
+        depth_estimator.close()
         if 'gui' in dir():
             gui.close()
         else:
             cv2.destroyAllWindows()
         gaze_estimator.close()
+        global _ros_node
+        if _ros_node is not None:
+            try:
+                import rclpy
+                _ros_node.destroy_node()
+                if rclpy.ok():
+                    rclpy.shutdown()
+            except Exception:
+                pass
         print("[FoGaze] Shutdown.")
 
 

@@ -5,3 +5,11 @@ __pycache__/
 experiments/
 calibration.npz
 models/
+
+# ROS 2 colcon build artifacts
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Dear ImGui runtime window state
+imgui.ini
