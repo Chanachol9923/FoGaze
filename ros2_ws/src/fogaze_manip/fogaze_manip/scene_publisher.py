@@ -11,10 +11,11 @@ Pipeline position::
                                       move_group PlanningSceneMonitor + RViz
 
 Every object the app sees (class, real-world 3D ``pose`` from depth, real-world
-``size`` from the bbox) becomes an axis-aligned box in the arm base frame, so the
-detected scene "appears" in simulation at its true position/distance and the arm
-plans around it.  Objects that vanish between frames are REMOVEd so the scene
-tracks reality instead of accumulating ghosts.
+``size`` from the bbox) becomes an upright cylinder (height ~ bbox height, radius
+~ half bbox width) in the arm base frame, so the detected scene "appears" in
+simulation at its true position/distance and the arm plans around it.  Objects
+that vanish between frames are REMOVEd so the scene tracks reality instead of
+accumulating ghosts.
 
 The camera->arm TF comes from the same (currently placeholder) eye-to-hand
 transform used by ``pickup_planner`` — until that is calibrated, boxes land at
@@ -120,20 +121,20 @@ class ScenePublisher(Node):
             if xyz is None:
                 continue                  # TF not ready yet
             oid = f"{self.id_prefix}{i}"
-            self._publish_box(oid, xyz, size, obj.get("class", "object"))
+            self._publish_shape(oid, xyz, size, obj.get("class", "object"))
             cur_ids.add(oid)
 
-        # Remove boxes that were present last tick but are gone now.
+        # Remove shapes that were present last tick but are gone now.
         for stale in self._prev_ids - cur_ids:
             self._remove(stale)
         self._prev_ids = cur_ids
 
     # ───────────────────────────────────────────────────────────────────
-    def _publish_box(self, oid, xyz, size, cls) -> None:
+    def _publish_shape(self, oid, xyz, size, cls) -> None:
         w, h = (size if size and len(size) == 2 else (0.05, 0.05))
-        dx = max(w, self.min_dim_m)                 # horizontal footprint ~ width
-        dy = max(self.default_depth_m, self.min_dim_m)
-        dz = max(h, self.min_dim_m)                 # vertical extent ~ height
+        height = max(h, self.min_dim_m)             # vertical extent ~ height
+        radius = max(w, self.default_depth_m) / 2.0  # footprint ~ half width
+        radius = max(radius, self.min_dim_m / 2.0)
 
         co = CollisionObject()
         co.header.frame_id = self.arm_base_frame
@@ -141,8 +142,8 @@ class ScenePublisher(Node):
         co.id = oid
 
         prim = SolidPrimitive()
-        prim.type = SolidPrimitive.BOX
-        prim.dimensions = [dx, dy, dz]
+        prim.type = SolidPrimitive.CYLINDER       # upright cylinder (axis = +z)
+        prim.dimensions = [height, radius]        # CYLINDER: [height, radius]
 
         from geometry_msgs.msg import Pose
         p = Pose()
