@@ -89,6 +89,14 @@ class OneEuroSmoother(BaseSmoother):
     def step(self, x, y):
         return self._fx(x), self._fy(y)
 
+    def set_params(self, min_cutoff=None, beta=None):
+        """Live-tune both axes (lower min_cutoff = smoother / less jitter)."""
+        for f in (self._fx, self._fy):
+            if min_cutoff is not None:
+                f.min_cutoff = min_cutoff
+            if beta is not None:
+                f.beta = beta
+
     def reset(self):
         self._fx.reset()
         self._fy.reset()

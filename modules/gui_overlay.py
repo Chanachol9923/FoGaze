@@ -10,6 +10,74 @@ import imgui
 from imgui.integrations.glfw import GlfwRenderer
 
 
+def apply_fogaze_theme():
+    """Apply a clean modern dark theme matching FoGaze's cyan accent palette.
+
+    Called once after the ImGui context is created.  Sets rounded corners,
+    comfortable spacing, and a navy/cyan colour scheme so the panels look
+    cohesive instead of the default ImGui grey.
+    """
+    style = imgui.get_style()
+
+    # ── Geometry: rounded, roomy, flat ──────────────────────────────────
+    style.window_rounding = 8.0
+    style.child_rounding = 8.0
+    style.frame_rounding = 6.0
+    style.popup_rounding = 6.0
+    style.grab_rounding = 6.0
+    style.scrollbar_rounding = 8.0
+    style.tab_rounding = 6.0
+    style.window_border_size = 0.0
+    style.frame_border_size = 0.0
+    style.window_padding = (14, 14)
+    style.frame_padding = (10, 7)
+    style.item_spacing = (9, 9)
+    style.item_inner_spacing = (7, 6)
+    style.scrollbar_size = 12.0
+    style.grab_min_size = 10.0
+    style.window_title_align = (0.5, 0.5)
+
+    # ── Colour palette (RGBA floats) ────────────────────────────────────
+    CYAN     = (0.20, 0.78, 1.00, 1.00)
+    CYAN_DIM = (0.20, 0.78, 1.00, 0.55)
+    CYAN_LOW = (0.20, 0.78, 1.00, 0.28)
+    BG_WIN   = (0.05, 0.06, 0.11, 0.96)
+    BG_CHILD = (0.07, 0.08, 0.14, 1.00)
+    BG_FRAME = (0.13, 0.15, 0.23, 1.00)
+    BG_HOVER = (0.18, 0.21, 0.31, 1.00)
+    BG_ACTIVE= (0.22, 0.26, 0.38, 1.00)
+    TEXT     = (0.90, 0.91, 0.94, 1.00)
+    TEXT_DIM = (0.50, 0.53, 0.60, 1.00)
+    BORDER   = (0.16, 0.18, 0.26, 1.00)
+
+    c = style.colors
+    c[imgui.COLOR_TEXT]                    = TEXT
+    c[imgui.COLOR_TEXT_DISABLED]           = TEXT_DIM
+    c[imgui.COLOR_WINDOW_BACKGROUND]       = BG_WIN
+    c[imgui.COLOR_CHILD_BACKGROUND]        = BG_CHILD
+    c[imgui.COLOR_POPUP_BACKGROUND]        = BG_WIN
+    c[imgui.COLOR_BORDER]                  = BORDER
+    c[imgui.COLOR_FRAME_BACKGROUND]        = BG_FRAME
+    c[imgui.COLOR_FRAME_BACKGROUND_HOVERED]= BG_HOVER
+    c[imgui.COLOR_FRAME_BACKGROUND_ACTIVE] = BG_ACTIVE
+    c[imgui.COLOR_TITLE_BACKGROUND]        = BG_CHILD
+    c[imgui.COLOR_TITLE_BACKGROUND_ACTIVE] = BG_CHILD
+    c[imgui.COLOR_BUTTON]                  = (0.16, 0.20, 0.30, 1.00)
+    c[imgui.COLOR_BUTTON_HOVERED]          = (0.20, 0.55, 0.72, 1.00)
+    c[imgui.COLOR_BUTTON_ACTIVE]           = CYAN
+    c[imgui.COLOR_HEADER]                  = CYAN_LOW
+    c[imgui.COLOR_HEADER_HOVERED]          = CYAN_DIM
+    c[imgui.COLOR_HEADER_ACTIVE]           = CYAN_DIM
+    c[imgui.COLOR_CHECK_MARK]              = CYAN
+    c[imgui.COLOR_SLIDER_GRAB]             = CYAN
+    c[imgui.COLOR_SLIDER_GRAB_ACTIVE]      = (0.45, 0.88, 1.00, 1.00)
+    c[imgui.COLOR_SEPARATOR]               = BORDER
+    c[imgui.COLOR_SCROLLBAR_BACKGROUND]    = (0.05, 0.06, 0.11, 0.0)
+    c[imgui.COLOR_SCROLLBAR_GRAB]          = BG_HOVER
+    c[imgui.COLOR_SCROLLBAR_GRAB_HOVERED]  = BG_ACTIVE
+    c[imgui.COLOR_SCROLLBAR_GRAB_ACTIVE]   = CYAN_DIM
+
+
 class GUIOverlay:
     """Manages a fullscreen GLFW window with Dear ImGui overlay.
 
@@ -69,8 +137,12 @@ class GUIOverlay:
 
         self._content_w = width
         self._content_h = height
+        # Left margin reserved for the side panel — the scene image is
+        # rendered to the right of it so the panel never covers the view.
+        self._margin_left = 0
 
         imgui.create_context()
+        apply_fogaze_theme()
         self._impl = GlfwRenderer(self._window)
 
         self._width, self._height = win_w, win_h
@@ -109,6 +181,14 @@ class GUIOverlay:
     @property
     def window(self):
         return self._window
+
+    @property
+    def margin_left(self) -> int:
+        return self._margin_left
+
+    @margin_left.setter
+    def margin_left(self, value: int):
+        self._margin_left = max(0, int(value))
 
     @property
     def face_texture_id(self):
@@ -201,6 +281,9 @@ class GUIOverlay:
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        # Rows are tightly packed (no 4-byte padding); without this an
+        # arbitrary-width RGB image (e.g. the eye crop) skews diagonally.
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, w, h, 0,
                         gl.GL_RGB, gl.GL_UNSIGNED_BYTE, data)
 
@@ -209,14 +292,16 @@ class GUIOverlay:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         data = np.ascontiguousarray(rgb)
 
-        if self._face_tex is not None:
-            gl.glDeleteTextures([self._face_tex])
-        self._face_tex = gl.glGenTextures(1)
+        if self._face_tex is None:
+            self._face_tex = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._face_tex)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        # Rows are tightly packed (no 4-byte padding); without this an
+        # arbitrary-width RGB image (e.g. the eye crop) skews diagonally.
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, w, h, 0,
                         gl.GL_RGB, gl.GL_UNSIGNED_BYTE, data)
 
@@ -226,14 +311,16 @@ class GUIOverlay:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         data = np.ascontiguousarray(rgb)
 
-        if self._depth_tex is not None:
-            gl.glDeleteTextures([self._depth_tex])
-        self._depth_tex = gl.glGenTextures(1)
+        if self._depth_tex is None:
+            self._depth_tex = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._depth_tex)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        # Rows are tightly packed (no 4-byte padding); without this an
+        # arbitrary-width RGB image (e.g. the eye crop) skews diagonally.
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, w, h, 0,
                         gl.GL_RGB, gl.GL_UNSIGNED_BYTE, data)
 
@@ -243,14 +330,16 @@ class GUIOverlay:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         data = np.ascontiguousarray(rgb)
 
-        if self._eye_tex is not None:
-            gl.glDeleteTextures([self._eye_tex])
-        self._eye_tex = gl.glGenTextures(1)
+        if self._eye_tex is None:
+            self._eye_tex = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._eye_tex)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+        # Rows are tightly packed (no 4-byte padding); without this an
+        # arbitrary-width RGB image (e.g. the eye crop) skews diagonally.
+        gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGB, w, h, 0,
                         gl.GL_RGB, gl.GL_UNSIGNED_BYTE, data)
 
@@ -269,19 +358,25 @@ class GUIOverlay:
     def _draw_texture_full(self, tex_id: int, tex_w: int = 0, tex_h: int = 0):
         if tex_w == 0 or tex_h == 0:
             tex_w, tex_h = self._content_w, self._content_h
+
+        # Available region = whole window minus the reserved left panel.
+        region_x = self._margin_left
+        region_w = max(1, self._width - self._margin_left)
+        region_h = self._height
+
         tex_aspect = tex_w / tex_h
-        win_aspect = self._width / self._height
+        win_aspect = region_w / region_h
         if tex_aspect > win_aspect:
-            # Window is taller — letterbox top/bottom
-            draw_w = self._width
-            draw_h = self._width / tex_aspect
-            ox = 0
-            oy = (self._height - draw_h) / 2
+            # Region is taller — letterbox top/bottom
+            draw_w = region_w
+            draw_h = region_w / tex_aspect
+            ox = region_x
+            oy = (region_h - draw_h) / 2
         else:
-            # Window is wider — letterbox left/right
-            draw_h = self._height
-            draw_w = self._height * tex_aspect
-            ox = (self._width - draw_w) / 2
+            # Region is wider — letterbox left/right
+            draw_h = region_h
+            draw_w = region_h * tex_aspect
+            ox = region_x + (region_w - draw_w) / 2
             oy = 0
         gl.glEnable(gl.GL_TEXTURE_2D)
         gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)

@@ -2,144 +2,134 @@ from __future__ import annotations
 
 import threading
 import time as _time
-import warnings
-from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
-from transformers import (
-    AutoImageProcessor,
-    AutoModelForDepthEstimation,
-)
+from openni import openni2
 
 
-DEPTH_CAL_PATH = Path.home() / ".cache" / "fogaze3" / "depth_cal.npz"
+COLORMAPS = [
+    cv2.COLORMAP_AUTUMN, cv2.COLORMAP_BONE, cv2.COLORMAP_JET,
+    cv2.COLORMAP_WINTER, cv2.COLORMAP_RAINBOW, cv2.COLORMAP_OCEAN,
+    cv2.COLORMAP_SUMMER, cv2.COLORMAP_SPRING, cv2.COLORMAP_COOL,
+    cv2.COLORMAP_HSV, cv2.COLORMAP_PINK, cv2.COLORMAP_HOT,
+    cv2.COLORMAP_PARULA, cv2.COLORMAP_MAGMA, cv2.COLORMAP_INFERNO,
+]
+
+
+OPTS = {
+    "min_dist_mm": 200,
+    "max_dist_mm": 3500,
+    "off_x": 0,
+    "off_y": 0,
+    "cmap_idx": 2,
+    "snap_strength": 0.6,   # blue snap-point magnetism (0 = off → pure gaze)
+    "gaze_smooth": 0.7,     # One-Euro smoothing (0 = snappy, 1 = very steady)
+}
 
 
 class DepthEstimator:
-    MODEL_NAME = "depth-anything/Depth-Anything-V2-Metric-Indoor-Base-hf"
+    def __init__(self):
+        openni2.initialize()
+        uris = openni2.Device.enumerate_uris()
+        if not uris:
+            raise RuntimeError("No PrimeSense device found")
+        self._dev = openni2.Device.open_file(uris[0])
+        info = self._dev.get_device_info()
+        print(f"[DepthEstimator] Device: {info.name} / {info.vendor}")
 
-    def __init__(self, device="cuda", depth_size: int = 384,
-                 min_interval: float = 1.5):
-        self._depth_size = depth_size
-        self._min_interval = max(0.0, min_interval)
-        self._last_submit_time = 0.0
-        cuda_ok = False
-        if device == "cuda" and torch.cuda.is_available():
-            try:
-                cc = torch.cuda.get_device_capability()
-                cuda_ok = cc >= (7, 0)
-                if not cuda_ok:
-                    warnings.warn(
-                        f"GPU CC {cc[0]}.{cc[1]} too low, falling back to CPU"
-                    )
-            except Exception:
-                cuda_ok = False
+        # Depth stream 640x480 @30fps 1mm precision
+        self._depth_stream = self._dev.create_depth_stream()
+        depth_modes = self._depth_stream.get_sensor_info().videoModes
+        self._depth_mode = None
+        for m in depth_modes:
+            if (m.resolutionX == 640 and m.resolutionY == 480
+                    and str(m.pixelFormat) == "OniPixelFormat.ONI_PIXEL_FORMAT_DEPTH_1_MM"):
+                self._depth_mode = m
+                break
+        if self._depth_mode is None:
+            self._depth_mode = depth_modes[4]
+        self._depth_stream.set_video_mode(self._depth_mode)
+        self._depth_stream.start()
+        print(f"[DepthEstimator] Depth: {self._depth_mode.resolutionX}x{self._depth_mode.resolutionY} "
+              f"@{self._depth_mode.fps}fps")
 
-        self.device = torch.device(
-            "cuda" if (device == "cuda" and cuda_ok) else "cpu"
-        )
-        print(f"[DepthEstimator] Using device: {self.device}")
-
-        self.processor = AutoImageProcessor.from_pretrained(self.MODEL_NAME)
-        self.processor.size = {"height": self._depth_size, "width": self._depth_size}
-        print(f"[DepthEstimator] Processor input size: {self._depth_size}x{self._depth_size}")
-        self.model = (
-            AutoModelForDepthEstimation.from_pretrained(self.MODEL_NAME)
-            .to(self.device)
-            .eval()
-        )
+        # Color stream 640x480 @30fps RGB
+        self._color_stream = self._dev.create_color_stream()
+        color_modes = self._color_stream.get_sensor_info().videoModes
+        self._color_mode = None
+        for m in color_modes:
+            if (m.resolutionX == 640 and m.resolutionY == 480
+                    and str(m.pixelFormat) == "OniPixelFormat.ONI_PIXEL_FORMAT_RGB888"):
+                self._color_mode = m
+                break
+        if self._color_mode is None:
+            self._color_mode = color_modes[4]
+        self._color_stream.set_video_mode(self._color_mode)
+        self._color_stream.start()
+        print(f"[DepthEstimator] Color: {self._color_mode.resolutionX}x{self._color_mode.resolutionY} "
+              f"@{self._color_mode.fps}fps")
 
         self._lock = threading.Lock()
-        self._pending_frame = None
         self._last_depth = None
-        self._last_depth_time = 0.0
-        self._h, self._w = None, None
-
-        self.cal_scale = None
-        self._load_cal()
+        self._last_color = None
+        self._latest_depth = None
+        self._latest_color = None
 
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._thread.start()
 
-    def _load_cal(self):
-        if DEPTH_CAL_PATH.exists():
-            try:
-                data = np.load(DEPTH_CAL_PATH)
-                self.cal_scale = float(data["scale"])
-                print(f"[DepthEstimator] Loaded calibration scale: {self.cal_scale:.4f}")
-            except Exception as e:
-                print(f"[DepthEstimator] Failed to load depth calibration: {e}")
-
-    def save_cal(self, scale: float):
-        self.cal_scale = scale
-        DEPTH_CAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(DEPTH_CAL_PATH, scale=scale)
-        print(f"[DepthEstimator] Saved calibration scale: {scale:.4f}")
-
-    def reset_cal(self):
-        self.cal_scale = None
-        if DEPTH_CAL_PATH.exists():
-            DEPTH_CAL_PATH.unlink()
-        print("[DepthEstimator] Calibration reset.")
-
     def _worker_loop(self):
         while True:
-            frame = None
-            with self._lock:
-                if self._pending_frame is not None:
-                    frame = self._pending_frame
-                    self._pending_frame = None
-            if frame is not None:
-                depth = self._run_inference(frame)
+            try:
+                df = self._depth_stream.read_frame()
+                cf = self._color_stream.read_frame()
+
+                depth_buf = df.get_buffer_as_uint16()
+                depth = np.frombuffer(depth_buf, dtype=np.uint16).reshape(
+                    df.height, df.width).astype(np.float32)
+
+                color_buf = cf.get_buffer_as_uint8()
+                color = np.frombuffer(color_buf, dtype=np.uint8).reshape(
+                    cf.height, cf.width, 3)
+                color = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
+                color = cv2.flip(color, 1)
+                depth = cv2.flip(depth, 1)
+
+                off_x = OPTS["off_x"]
+                off_y = OPTS["off_y"]
+                if off_x != 0 or off_y != 0:
+                    M = np.float32([[1, 0, off_x], [0, 1, off_y]])
+                    depth = cv2.warpAffine(
+                        depth, M, (df.width, df.height),
+                        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
                 with self._lock:
                     self._last_depth = depth
-                    self._last_depth_time = _time.time()
-                    self._h, self._w = depth.shape[:2]
-            else:
-                _time.sleep(0.005)
+                    self._last_color = color
+            except Exception as e:
+                print(f"[DepthEstimator] Stream read error: {e}")
+                _time.sleep(0.01)
 
-    @torch.no_grad()
-    def _run_inference(self, image_bgr: np.ndarray) -> np.ndarray:
-        h, w = image_bgr.shape[:2]
-        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
-
-        outputs = self.model(**inputs)
-        depth = outputs.predicted_depth
-
-        depth = torch.nn.functional.interpolate(
-            depth.unsqueeze(1),
-            size=(h, w),
-            mode="bicubic",
-            align_corners=False,
-        ).squeeze()
-        return depth.cpu().numpy().astype(np.float32)
-
-    def estimate_sync(self, image_bgr: np.ndarray) -> np.ndarray:
-        """Run depth estimation synchronously (blocks until done). Used during calibration."""
-        depth = self._run_inference(image_bgr)
+    def get_frame(self):
         with self._lock:
-            self._last_depth = depth
-            self._last_depth_time = _time.time()
-            self._h, self._w = depth.shape[:2]
-        return depth
+            return self._last_color, self._last_depth
+
+    def save_params(self):
+        pass
+
+    def reset_cal(self):
+        pass
 
     @property
     def depth_freshness(self) -> float:
-        with self._lock:
-            if self._last_depth_time == 0:
-                return float('inf')
-            return _time.time() - self._last_depth_time
+        return 0.0
 
-    def estimate(self, image_bgr: np.ndarray) -> np.ndarray | None:
-        self._h, self._w = image_bgr.shape[:2]
-        now = _time.time()
-        if now - self._last_submit_time >= self._min_interval:
-            with self._lock:
-                self._pending_frame = image_bgr
-            self._last_submit_time = now
+    def estimate(self, image_bgr: np.ndarray | None = None) -> np.ndarray | None:
+        with self._lock:
+            return self._last_depth
+
+    def estimate_sync(self, image_bgr: np.ndarray | None = None) -> np.ndarray | None:
         with self._lock:
             return self._last_depth
 
@@ -151,32 +141,45 @@ class DepthEstimator:
         roi = d[y1:y2, x1:x2]
         if roi.size == 0:
             return None
-        return float(roi.mean())
+        valid = roi[(roi >= OPTS["min_dist_mm"]) & (roi <= OPTS["max_dist_mm"])]
+        if valid.size == 0:
+            return None
+        return float(valid.mean()) / 10.0
 
     def depth_to_distance_cm(
         self, depth_value: float, scene_min: float | None = None,
         scene_max: float | None = None,
     ) -> float:
-        """Convert raw DA2V metric depth (meters) to cm.
-
-        Metric model output is already in meters.
-        If calibrated, applies a fine-tuning scale factor.
-        """
-        cm = depth_value * 100.0
-        if self.cal_scale is not None:
-            cm *= self.cal_scale
-        return cm
+        return depth_value
 
     def colormap(self, depth_map: np.ndarray | None = None) -> np.ndarray:
-        if depth_map is not None:
-            d = depth_map
-        else:
-            with self._lock:
-                d = self._last_depth
         with self._lock:
-            h, w = self._h, self._w
+            d = self._last_depth if depth_map is None else depth_map
+            hw = (self._last_depth.shape[0], self._last_depth.shape[1]) if self._last_depth is not None else (480, 640)
         if d is None:
-            return np.zeros((h or 480, w or 640, 3), dtype=np.uint8)
-        norm = (d - d.min()) / (d.max() - d.min() + 1e-8)
-        norm = (norm * 255).astype(np.uint8)
-        return cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+            return np.zeros((*hw, 3), dtype=np.uint8)
+        clipped = np.where(
+            (d >= OPTS["min_dist_mm"]) & (d <= OPTS["max_dist_mm"]),
+            d, 0
+        ).astype(np.uint16)
+        if clipped.max() == 0:
+            return np.zeros((*hw, 3), dtype=np.uint8)
+        norm = cv2.normalize(clipped, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        cmap = COLORMAPS[min(OPTS["cmap_idx"], len(COLORMAPS) - 1)]
+        return cv2.applyColorMap(norm, cmap)
+
+    def close(self):
+        try:
+            self._depth_stream.stop()
+        except Exception:
+            pass
+        try:
+            self._color_stream.stop()
+        except Exception:
+            pass
+        try:
+            self._dev.close()
+        except Exception:
+            pass
+        openni2.unload()
+        print("[DepthEstimator] Closed.")

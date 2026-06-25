@@ -1,0 +1,91 @@
+<?xml version="1.0" ?>
+<!--
+  FoGaze demo world for Gazebo (Ignition Fortress, pairs with ROS 2 Humble).
+
+  A table with three objects sized to exercise the graspability classifier:
+    * can       (0.06 m wide)  -> graspable
+    * pen       (0.01 m wide)  -> too small / thin
+    * big_box   (0.30 m wide)  -> too wide for the gripper
+
+  Launch standalone with:  ign gazebo fogaze_table.sdf
+  Spawn a Panda + ros2_control alongside to drive it with MoveIt (see README).
+-->
+<sdf version="1.8">
+  <world name="fogaze_table">
+    <plugin filename="ignition-gazebo-physics-system"
+            name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="ignition-gazebo-user-commands-system"
+            name="ignition::gazebo::systems::UserCommands"/>
+    <plugin filename="ignition-gazebo-scene-broadcaster-system"
+            name="ignition::gazebo::systems::SceneBroadcaster"/>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <direction>-0.3 0.2 -0.9</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="c"><geometry><plane>
+          <normal>0 0 1</normal><size>20 20</size>
+        </plane></geometry></collision>
+        <visual name="v"><geometry><plane>
+          <normal>0 0 1</normal><size>20 20</size>
+        </plane></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Table top (0.4 m high) -->
+    <model name="table">
+      <static>true</static>
+      <pose>0.5 0 0.2 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.6 0.8 0.4</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.6 0.8 0.4</size></box></geometry>
+          <material><ambient>0.6 0.45 0.3 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Graspable: a can (~6 cm) -->
+    <model name="can">
+      <pose>0.45 -0.15 0.45 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.2</mass></inertial>
+        <collision name="c"><geometry><cylinder><radius>0.03</radius><length>0.12</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.03</radius><length>0.12</length></cylinder></geometry>
+          <material><ambient>0.2 0.6 0.9 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Too thin: a pen (~1 cm) -->
+    <model name="pen">
+      <pose>0.5 0.0 0.42 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>0.02</mass></inertial>
+        <collision name="c"><geometry><box><size>0.01 0.01 0.14</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.01 0.01 0.14</size></box></geometry>
+          <material><ambient>0.9 0.2 0.2 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Too wide for the gripper: a 30 cm box -->
+    <model name="big_box">
+      <pose>0.5 0.2 0.5 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>1.0</mass></inertial>
+        <collision name="c"><geometry><box><size>0.3 0.3 0.2</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.3 0.3 0.2</size></box></geometry>
+          <material><ambient>0.4 0.4 0.45 1</ambient></material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

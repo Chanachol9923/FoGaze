@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+import sys
+import os
+
+# Find FoGaze root by walking up from this script
+_FOGAZE_ROOT = os.path.dirname(os.path.abspath(sys.argv[0]))
+for _ in range(10):
+    if os.path.isfile(os.path.join(_FOGAZE_ROOT, "modules", "depth_estimator.py")):
+        break
+    _FOGAZE_ROOT = os.path.dirname(_FOGAZE_ROOT)
+if _FOGAZE_ROOT not in sys.path:
+    sys.path.insert(0, _FOGAZE_ROOT)
+
+from fogaze_rviz.fogaze_node import main
+main()

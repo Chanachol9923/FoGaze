@@ -1,0 +1,57 @@
+[
+  {
+    "class_name": "chair",
+    "bbox": [
+      380,
+      25,
+      520,
+      150
+    ],
+    "dist_cm": 120,
+    "confidence": 0.81
+  },
+  {
+    "class_name": "bottle",
+    "bbox": [
+      150,
+      150,
+      212,
+      355
+    ],
+    "dist_cm": 55,
+    "confidence": 0.88
+  },
+  {
+    "class_name": "cup",
+    "bbox": [
+      285,
+      235,
+      350,
+      330
+    ],
+    "dist_cm": 50,
+    "confidence": 0.84
+  },
+  {
+    "class_name": "spoon",
+    "bbox": [
+      385,
+      315,
+      505,
+      352
+    ],
+    "dist_cm": 45,
+    "confidence": 0.79
+  },
+  {
+    "class_name": "apple",
+    "bbox": [
+      250,
+      360,
+      322,
+      430
+    ],
+    "dist_cm": 60,
+    "confidence": 0.86
+  }
+]
