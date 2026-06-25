@@ -292,9 +292,8 @@ class GUIOverlay:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         data = np.ascontiguousarray(rgb)
 
-        if self._face_tex is not None:
-            gl.glDeleteTextures([self._face_tex])
-        self._face_tex = gl.glGenTextures(1)
+        if self._face_tex is None:
+            self._face_tex = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._face_tex)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
@@ -312,9 +311,8 @@ class GUIOverlay:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         data = np.ascontiguousarray(rgb)
 
-        if self._depth_tex is not None:
-            gl.glDeleteTextures([self._depth_tex])
-        self._depth_tex = gl.glGenTextures(1)
+        if self._depth_tex is None:
+            self._depth_tex = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._depth_tex)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
@@ -332,9 +330,8 @@ class GUIOverlay:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         data = np.ascontiguousarray(rgb)
 
-        if self._eye_tex is not None:
-            gl.glDeleteTextures([self._eye_tex])
-        self._eye_tex = gl.glGenTextures(1)
+        if self._eye_tex is None:
+            self._eye_tex = gl.glGenTextures(1)
         gl.glBindTexture(gl.GL_TEXTURE_2D, self._eye_tex)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
         gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)

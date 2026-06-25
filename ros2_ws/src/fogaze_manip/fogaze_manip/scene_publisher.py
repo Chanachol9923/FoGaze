@@ -51,6 +51,15 @@ class ScenePublisher(Node):
         self.declare_parameter("update_hz", 4.0)
         # Only mirror objects that have a real depth-derived pose.
         self.declare_parameter("id_prefix", "yolo_")
+        # Static support surface (a "table") so the scene looks like a tabletop
+        # and the arm plans ABOVE a real plane instead of through empty space.
+        # Pose/size are in the arm base frame; defaults sit just under where the
+        # camera->arm TF places typical 0.4-0.6 m detections.  Set
+        # support_surface:=false to drop it (e.g. a wall-mounted arm).
+        self.declare_parameter("support_surface", True)
+        self.declare_parameter("table_id", "table_surface")
+        self.declare_parameter("table_size", [0.5, 1.0, 0.3])     # x, y, z (m)
+        self.declare_parameter("table_center", [0.55, 0.0, 0.0])  # x, y, z (m)
 
         self.arm_base_frame = self.get_parameter("arm_base_frame").value
         self.camera_frame = self.get_parameter("camera_frame").value
@@ -58,6 +67,10 @@ class ScenePublisher(Node):
         self.default_depth_m = self.get_parameter("default_depth_m").value
         self.min_dim_m = self.get_parameter("min_dim_m").value
         self.id_prefix = self.get_parameter("id_prefix").value
+        self.support_surface = self.get_parameter("support_surface").value
+        self.table_id = self.get_parameter("table_id").value
+        self.table_size = list(self.get_parameter("table_size").value)
+        self.table_center = list(self.get_parameter("table_center").value)
         period = 1.0 / max(self.get_parameter("update_hz").value, 0.1)
 
         # ── TF ─────────────────────────────────────────────────────────
@@ -107,6 +120,11 @@ class ScenePublisher(Node):
             self._picking = False
 
     def _tick(self) -> None:
+        # The support surface is part of the world, not a detection — keep it
+        # present even while a pick runs (the arm must always avoid the table).
+        if self.support_surface:
+            self._publish_table()
+
         if self._latest is None or self._picking:
             return
         objects, frame = self._latest
@@ -130,11 +148,35 @@ class ScenePublisher(Node):
         self._prev_ids = cur_ids
 
     # ───────────────────────────────────────────────────────────────────
+    def _publish_table(self) -> None:
+        """(Re)publish the static support surface as a BOX collision object."""
+        from geometry_msgs.msg import Pose
+
+        co = CollisionObject()
+        co.header.frame_id = self.arm_base_frame
+        co.header.stamp = self.get_clock().now().to_msg()
+        co.id = self.table_id
+
+        prim = SolidPrimitive()
+        prim.type = SolidPrimitive.BOX
+        prim.dimensions = [max(d, self.min_dim_m) for d in self.table_size]
+
+        p = Pose()
+        p.position.x, p.position.y, p.position.z = self.table_center
+        p.orientation.w = 1.0
+
+        co.primitives = [prim]
+        co.primitive_poses = [p]
+        co.operation = CollisionObject.ADD     # ADD is idempotent (updates id)
+        self.pub_co.publish(co)
+
     def _publish_shape(self, oid, xyz, size, cls) -> None:
         w, h = (size if size and len(size) == 2 else (0.05, 0.05))
+        # Size proportional to the real object: height = bbox height, the
+        # cylinder diameter = bbox width (so the gripper closes on the true
+        # width).  Clamp only against degenerate/zero dims.
         height = max(h, self.min_dim_m)             # vertical extent ~ height
-        radius = max(w, self.default_depth_m) / 2.0  # footprint ~ half width
-        radius = max(radius, self.min_dim_m / 2.0)
+        radius = max(w, self.min_dim_m) / 2.0       # diameter ~ real width
 
         co = CollisionObject()
         co.header.frame_id = self.arm_base_frame

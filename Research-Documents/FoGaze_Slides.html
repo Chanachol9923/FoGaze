@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FoGaze — Research Presentation</title>
+<style>
+  :root{
+    --bg:#eef2fa; --paper:#ffffff; --ink:#16203c; --dim:#56678b;
+    --line:#dbe3f3;
+    --blue:#2563eb;   /* gaze     */
+    --green:#0f9d58;  /* vision/3D */
+    --amber:#f59e0b;  /* highlight */
+    --rose:#e11d63;   /* problem   */
+    --hiwash:rgba(245,158,11,.30);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;
+    background:
+      radial-gradient(1100px 700px at 85% -15%,#dbe7ff 0%,transparent 60%),
+      radial-gradient(900px 600px at -10% 110%,#e3fff1 0%,transparent 55%),
+      var(--bg);
+    color:var(--ink); overflow:hidden;
+  }
+  .deck{height:100vh;width:100vw;position:relative}
+  .slide{
+    position:absolute;inset:0;display:none;
+    flex-direction:column;justify-content:center;
+    padding:4.5vh 6vw;animation:fade .45s ease;
+  }
+  .slide.active{display:flex}
+  @keyframes fade{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+
+  .kicker{font-size:1.5rem;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--blue);font-weight:800;margin-bottom:1.1rem}
+  h1{font-size:3.6rem;line-height:1.12;font-weight:800;letter-spacing:-.01em}
+  h2{font-size:3.2rem;line-height:1.14;font-weight:800;margin-bottom:1.3rem}
+  .lead{font-size:2.05rem;line-height:1.5;color:var(--ink);max-width:64ch}
+  .sub{font-size:1.7rem;color:var(--dim);margin-top:1.2rem;line-height:1.55}
+  ul{list-style:none;margin-top:.5rem}
+  li{font-size:2.0rem;line-height:1.5;margin:.85rem 0;padding-left:2.6rem;position:relative}
+  li::before{content:"";position:absolute;left:0;top:.62em;width:1.05rem;height:1.05rem;
+    border-radius:3px;background:var(--green);transform:rotate(45deg)}
+  li.b::before{background:var(--blue)} li.p::before{background:var(--rose)} li.a::before{background:var(--amber)}
+  .hi{font-weight:800;background:linear-gradient(transparent 58%,var(--hiwash) 0);padding:0 .12em}
+  .g{color:var(--green)}.b{color:var(--blue)}.p{color:var(--rose)}.a{color:#b8860b}.ink{color:var(--ink)}
+  .big{font-size:2.4rem;line-height:1.4}
+
+  .row{display:flex;gap:2.4rem;align-items:center;flex-wrap:wrap}
+  .col{flex:1 1 0;min-width:320px}
+  .cards{display:flex;gap:1.5rem;flex-wrap:wrap;margin-top:1.2rem}
+  .card{background:var(--paper);border:1px solid var(--line);border-radius:20px;
+    padding:1.7rem 1.8rem;flex:1 1 250px;box-shadow:0 10px 28px rgba(37,60,120,.10)}
+  .card .num{font-size:1.5rem;font-weight:800;color:#9aa7c8}
+  .card h3{font-size:1.8rem;margin:.2rem 0 .55rem}
+  .card p{font-size:1.55rem;color:var(--dim);line-height:1.45}
+  .tag{display:inline-block;font-size:1.45rem;font-weight:700;background:#eaf0ff;
+    color:#274690;border:1px solid #c9d8ff;border-radius:999px;padding:.5rem 1.25rem;margin:.45rem .5rem .45rem 0}
+  .badge{font-size:1.45rem;color:#3a2a00;background:var(--amber);font-weight:800;
+    border-radius:999px;padding:.32rem 1.05rem;display:inline-block}
+  .quote{font-size:2.1rem;font-weight:700;font-style:italic;color:var(--blue);background:var(--paper);
+    border-left:8px solid var(--amber);border-radius:0 16px 16px 0;padding:1.2rem 1.5rem;
+    box-shadow:0 10px 28px rgba(37,60,120,.10);max-width:60ch;margin-top:1.3rem}
+
+  .footer{position:absolute;bottom:2.2vh;left:6vw;right:6vw;display:flex;
+    justify-content:space-between;align-items:center;color:#8a99ba;font-size:1.3rem}
+  .prog{position:absolute;bottom:0;left:0;height:6px;width:0;
+    background:linear-gradient(90deg,var(--blue),var(--green));transition:width .3s}
+  .hint{position:fixed;bottom:.9rem;right:1.3rem;color:#a6b2cc;font-size:1.1rem}
+  svg{max-width:100%;height:auto;display:block}
+  .cap{font-size:1.4rem;color:var(--dim);margin-top:.6rem;text-align:center}
+  .center{align-items:center;text-align:center}
+  .center .lead{margin-left:auto;margin-right:auto}
+  .title-main{font-size:3.0rem;line-height:1.18;font-weight:800;max-width:26ch}
+  .arrowtxt{font-size:2.4rem;font-weight:800;color:var(--amber);margin:0 .3rem}
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+  <!-- 1 · TITLE -->
+  <section class="slide center">
+    <div class="kicker">An End-to-End Assistive Robotics Pipeline</div>
+    <h1 class="title-main">
+      Target Object Specification using
+      <span class="b">Gaze-Driven Stereo Vision</span> and
+      <span class="g">Spatial Relationship Mapping</span>
+      for <span class="p">People with Physical Disabilities</span>
+    </h1>
+    <div style="margin-top:1.5rem">
+      <span class="tag">Gaze-Driven</span><span class="tag">Stereo Vision</span>
+      <span class="tag">Spatial Mapping</span><span class="tag">Assistive Robot</span>
+    </div>
+    <p class="lead" style="margin-top:1.7rem;font-size:1.7rem;color:var(--dim)">
+      Presented by
+      <span class="hi" style="font-size:2.1rem;color:var(--ink)">CHANACHOL&nbsp;POLKETKIT</span><br>
+      <span style="font-size:1.45rem">Third-year Computer Science Student</span></p>
+  </section>
+
+  <!-- 2 · RESEARCH TARGET -->
+  <section class="slide">
+    <div class="kicker">01 · Research Target</div>
+    <h2>What this research is for</h2>
+    <div class="row">
+      <div class="col">
+        <div class="cards" style="flex-direction:column">
+          <div class="card"><div class="num">Target Group</div>
+            <p class="ink" style="font-size:1.75rem;font-weight:700">People with <span class="p">severe</span> physical disabilities<br>(ALS, paralysis)</p></div>
+          <div class="card"><div class="num">The Goal</div>
+            <p class="ink" style="font-size:1.75rem;font-weight:700">Turn <span class="b">“looking”</span> into a <span class="g">“command to fetch an object”</span></p></div>
+        </div>
+      </div>
+      <div class="col">
+        <svg viewBox="0 0 460 230" role="img">
+          <rect x="0" y="0" width="460" height="230" rx="16" fill="#fff" stroke="#dbe3f3"/>
+          <!-- face -->
+          <g transform="translate(40,70)">
+            <circle cx="35" cy="45" r="34" fill="#eaf0ff" stroke="#2563eb" stroke-width="3"/>
+            <circle cx="50" cy="38" r="6" fill="#16203c"/>
+            <text x="6" y="118" fill="#2563eb" font-size="17" font-weight="800">Look</text>
+          </g>
+          <text x="135" y="120" class="arrowtxt" fill="#f59e0b" font-size="40" font-weight="800">→</text>
+          <!-- lock -->
+          <g transform="translate(178,75)">
+            <rect x="0" y="6" width="80" height="74" rx="10" fill="#fff7e6" stroke="#f59e0b" stroke-width="3"/>
+            <circle cx="40" cy="43" r="20" fill="none" stroke="#f59e0b" stroke-width="3"/>
+            <circle cx="40" cy="43" r="6" fill="#f59e0b"/>
+            <text x="-2" y="118" fill="#b8860b" font-size="17" font-weight="800">Lock target</text>
+          </g>
+          <text x="290" y="120" class="arrowtxt" fill="#f59e0b" font-size="40" font-weight="800">→</text>
+          <!-- robot -->
+          <g transform="translate(330,66)" stroke="#0f9d58" stroke-width="9" stroke-linecap="round" fill="none">
+            <path d="M14 84 L14 40"/><path d="M14 40 L62 22"/>
+            <circle cx="14" cy="40" r="6" fill="#f59e0b" stroke="none"/>
+          </g>
+          <rect x="392" y="78" width="22" height="34" rx="5" fill="#e6f6ec" stroke="#0f9d58" stroke-width="2"/>
+          <text x="330" y="190" fill="#0f9d58" font-size="17" font-weight="800">Robot fetches</text>
+        </svg>
+        <div class="cap"><b>Core Concept:</b> Look → Lock the object → Robot fetches it</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 · CORE OBJECTIVES -->
+  <section class="slide">
+    <div class="kicker g">02 · Core Objectives</div>
+    <h2>Four core objectives</h2>
+    <div class="cards">
+      <div class="card"><div class="num">1</div><h3 class="b">Gaze-Driven</h3>
+        <p>Compute <span class="hi">gaze coordinates</span> with an <span class="hi">ordinary webcam</span></p></div>
+      <div class="card"><div class="num">2</div><h3 class="g">Stereo Vision</h3>
+        <p>Locate the <span class="hi">position &amp; depth</span> (3D space) of objects</p></div>
+      <div class="card"><div class="num">3</div><h3 class="p">Spatial Mapping</h3>
+        <p>Turn coordinates into <span class="hi">spoken descriptions</span> of the surroundings</p></div>
+      <div class="card"><div class="num">4</div><h3 class="a">Assistive Automation</h3>
+        <p>Trigger pick-and-place <span class="hi">hands-free</span></p></div>
+    </div>
+    <p class="sub">Runs in <span class="hi">real time</span> on an <span class="hi">ordinary CPU</span> — no special-purpose hardware required.</p>
+  </section>
+
+  <!-- 4 · THE PROBLEM -->
+  <section class="slide">
+    <div class="kicker p">03 · The Problem</div>
+    <div class="row">
+      <div class="col">
+        <h2>Existing tools <span class="p">don't fit</span> this user</h2>
+        <p style="font-size:1.6rem;font-weight:800;color:var(--rose);margin:.2rem 0 .3rem">Current Limits</p>
+        <ul>
+          <li class="p">Gaze-tracking <span class="hi">IR hardware</span> is very expensive</li>
+          <li class="p">Often <span class="hi">head-mounted</span> → intrusive for the patient</li>
+          <li class="p">Tracks gaze on a <span class="hi">“flat screen”</span>, not <span class="g">“real 3-D objects”</span></li>
+        </ul>
+        <p style="font-size:1.6rem;font-weight:800;color:var(--green);margin:.8rem 0 .2rem">Our Solution</p>
+        <p class="big"><span class="hi">Low-cost</span> · <span class="hi">No wearables</span> · <span class="hi">Runs on a normal CPU</span></p>
+      </div>
+      <div class="col">
+        <svg viewBox="0 0 440 300" role="img">
+          <rect x="0" y="0" width="440" height="300" rx="16" fill="#fff" stroke="#dbe3f3"/>
+          <g transform="translate(38,66)">
+            <rect x="0" y="0" width="150" height="68" rx="14" fill="#fde7ef" stroke="#e11d63" stroke-width="3"/>
+            <circle cx="42" cy="34" r="15" fill="#fff" stroke="#e11d63"/><circle cx="108" cy="34" r="15" fill="#fff" stroke="#e11d63"/>
+            <text x="2" y="100" fill="#e11d63" font-size="17" font-weight="800">IR eye-tracker  $$$</text>
+          </g>
+          <text x="210" y="108" fill="#b8860b" font-size="44" font-weight="800">→</text>
+          <g transform="translate(286,68)">
+            <rect x="0" y="6" width="118" height="62" rx="12" fill="#e6f6ec" stroke="#0f9d58" stroke-width="3"/>
+            <circle cx="59" cy="37" r="14" fill="#fff" stroke="#0f9d58"/><circle cx="59" cy="37" r="5" fill="#0f9d58"/>
+            <text x="6" y="100" fill="#0f9d58" font-size="17" font-weight="800">plain webcam  $</text>
+          </g>
+          <text x="38" y="212" fill="#56678b" font-size="19">Our aim:</text>
+          <text x="38" y="248" fill="#16203c" font-size="23" font-weight="800">same power — accessible,</text>
+          <text x="38" y="280" fill="#b8860b" font-size="23" font-weight="800">low-cost, hands-free.</text>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 · SYSTEM ARCHITECTURE -->
+  <section class="slide">
+    <div class="kicker b">04 · System Architecture</div>
+    <h2>Dual-Camera Pipeline — two cameras, one frame</h2>
+    <svg viewBox="0 0 1160 330" style="margin-top:.2rem" role="img">
+      <!-- cam 1 -->
+      <rect x="15" y="22" width="300" height="92" rx="16" fill="#fff" stroke="#2563eb" stroke-width="3"/>
+      <text x="36" y="62" fill="#16203c" font-size="24" font-weight="800">Camera 1 · Face Camera</text>
+      <text x="36" y="96" fill="#56678b" font-size="19">tracks the eyes + blinks</text>
+      <!-- cam 2 -->
+      <rect x="15" y="216" width="300" height="92" rx="16" fill="#fff" stroke="#0f9d58" stroke-width="3"/>
+      <text x="36" y="256" fill="#16203c" font-size="24" font-weight="800">Camera 2 · Scene Camera</text>
+      <text x="36" y="290" fill="#56678b" font-size="19">scans objects + depth around you</text>
+      <!-- middle nodes -->
+      <rect x="392" y="36" width="240" height="64" rx="14" fill="#eef3ff" stroke="#2563eb" stroke-width="2"/>
+      <text x="412" y="76" fill="#2563eb" font-size="21" font-weight="800">Gaze coordinates</text>
+      <rect x="392" y="230" width="240" height="64" rx="14" fill="#e6f6ec" stroke="#0f9d58" stroke-width="2"/>
+      <text x="412" y="270" fill="#0f9d58" font-size="21" font-weight="800">Object box (YOLO)</text>
+      <!-- intersection -->
+      <circle cx="760" cy="165" r="58" fill="#fff7e6" stroke="#f59e0b" stroke-width="4"/>
+      <text x="760" y="172" fill="#b8860b" font-size="46" font-weight="800" text-anchor="middle">∩</text>
+      <!-- result -->
+      <rect x="868" y="120" width="276" height="92" rx="16" fill="#fff" stroke="#16203c" stroke-width="3"/>
+      <text x="892" y="160" fill="#16203c" font-size="23" font-weight="800">Selected object</text>
+      <text x="892" y="194" fill="#56678b" font-size="19">Target Object ✓</text>
+      <!-- arrows -->
+      <g fill="none" stroke-width="3">
+        <path d="M315 68 H392" stroke="#2563eb" marker-end="url(#ab)"/>
+        <path d="M315 262 H392" stroke="#0f9d58" marker-end="url(#ag)"/>
+        <path d="M632 68 Q700 90 715 130" stroke="#2563eb" marker-end="url(#ab)"/>
+        <path d="M632 262 Q700 240 715 200" stroke="#0f9d58" marker-end="url(#ag)"/>
+        <path d="M818 165 H868" stroke="#f59e0b" marker-end="url(#aa)"/>
+      </g>
+      <defs>
+        <marker id="ab" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#2563eb"/></marker>
+        <marker id="ag" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#0f9d58"/></marker>
+        <marker id="aa" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#f59e0b"/></marker>
+      </defs>
+    </svg>
+    <p class="sub"><b>The Logic:</b> <span class="b">Gaze coordinates</span> <span class="a">∩</span> <span class="g">YOLO object box</span> = <span class="hi">the object the user selected</span></p>
+  </section>
+
+  <!-- 6 · TECHNICAL STACK -->
+  <section class="slide">
+    <div class="kicker">05 · Technical Stack</div>
+    <h2>Technology stack — <span class="g">open-source</span> · <span class="b">CPU-friendly</span></h2>
+    <div class="cards">
+      <div class="card"><h3 class="b">Frontend UI</h3>
+        <p><b>Python 3</b> + <b>Dear ImGui</b><br><span class="hi">lightweight &amp; fast</span></p></div>
+      <div class="card"><h3 class="g">AI Perception</h3>
+        <p><b>MediaPipe</b> Face Landmarker + <b>EyeTrax</b> ML Model<br><b>Ultralytics YOLOv8</b> (Object Detection)</p></div>
+      <div class="card"><h3 class="a">Robotics Backend</h3>
+        <p><b>ROS 2 Humble</b> + <b>MoveIt</b><br><span class="hi">arm trajectory planning</span></p></div>
+    </div>
+    <p class="sub"><span class="hi">Python 3</span> on Ubuntu 22.04 · the robot layer is optional and <span class="hi">degrades gracefully</span> if absent.</p>
+  </section>
+
+  <!-- 7 · CORE FEATURES -->
+  <section class="slide">
+    <div class="kicker a">06 · Core Features</div>
+    <h2>Key features</h2>
+    <div class="cards">
+      <div class="card"><h3 class="b">Gaze Smoothing</h3>
+        <p><b>Kalman + EMA</b> filters reduce jitter and <span class="hi">lock the target steady</span></p></div>
+      <div class="card"><h3 class="g">Face Lock</h3>
+        <p><span class="hi">Auto-zoom on the face</span> → sharper eye coordinates</p></div>
+      <div class="card"><h3 class="p">Triple-Blink Trigger</h3>
+        <p>Blink <b>3×</b> = click to select <span class="hi">(hands-free)</span></p></div>
+      <div class="card"><h3 class="a">Spatial Mapping</h3>
+        <p>Turn position into <span class="hi">speech</span></p></div>
+    </div>
+    <div class="quote">“The cup is on your right.”</div>
+  </section>
+
+  <!-- 8 · ROBOT INTEGRATION -->
+  <section class="slide">
+    <div class="kicker a">07 · Robot Integration</div>
+    <div class="row">
+      <div class="col">
+        <h2>Look · Blink · <span class="g">Grab</span></h2>
+        <div class="cards" style="flex-direction:column">
+          <div class="card"><h3 class="p">Collision Avoidance</h3>
+            <p>Nearby objects you didn't look at become <span class="hi">automatic obstacles</span></p></div>
+          <div class="card"><h3 class="b">Safe Planning</h3>
+            <p>The arm plans a <span class="hi">collision-free path</span> to reach the target safely</p></div>
+          <div class="card"><h3 class="g">Grasp Analysis</h3>
+            <p>Compute <span class="hi">object size</span> so the gripper grips firmly — no drops</p></div>
+        </div>
+      </div>
+      <div class="col">
+        <svg viewBox="0 0 400 320" role="img">
+          <rect x="0" y="0" width="400" height="320" rx="16" fill="#fff" stroke="#dbe3f3"/>
+          <!-- collision boxes -->
+          <rect x="60" y="150" width="40" height="70" rx="5" fill="none" stroke="#e11d63" stroke-width="2.5" stroke-dasharray="5 5"/>
+          <rect x="120" y="120" width="40" height="100" rx="5" fill="none" stroke="#e11d63" stroke-width="2.5" stroke-dasharray="5 5"/>
+          <!-- base + arm -->
+          <rect x="40" y="252" width="86" height="22" rx="6" fill="#cdd8ee"/>
+          <g stroke="#2563eb" stroke-width="13" stroke-linecap="round" fill="none">
+            <path d="M84 252 L84 168"/><path d="M84 168 L184 118"/><path d="M184 118 L268 150"/>
+          </g>
+          <circle cx="84" cy="168" r="9" fill="#f59e0b"/><circle cx="184" cy="118" r="9" fill="#f59e0b"/>
+          <!-- gripper + target -->
+          <g stroke="#0f9d58" stroke-width="6" fill="none"><path d="M268 150 l16 -14"/><path d="M268 150 l16 14"/></g>
+          <rect x="296" y="128" width="28" height="48" rx="5" fill="#e6f6ec" stroke="#0f9d58" stroke-width="2"/>
+          <circle cx="310" cy="152" r="36" fill="none" stroke="#f59e0b" stroke-width="3"/>
+          <text x="40" y="306" fill="#56678b" font-size="16">MoveIt: approach → grasp → lift ✓ · avoid <tspan fill="#e11d63">collisions</tspan></text>
+        </svg>
+        <div class="cap">Unselected objects = obstacle boxes (red dashed) the arm must avoid.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 9 · CONCLUSION -->
+  <section class="slide center">
+    <div class="kicker">08 · Conclusion</div>
+    <h2 style="font-size:3.0rem">An assistive robot, controlled <span class="b">by the eyes</span></h2>
+    <div class="cards" style="margin-top:.6rem">
+      <div class="card"><h3 class="g">Key Success</h3>
+        <p>Control an assistive robot for people with disabilities using gaze — <span class="hi">running on a CPU in real time</span></p></div>
+      <div class="card"><h3 class="b">Next Step</h3>
+        <p><b>Quantitative study:</b> measure the <span class="hi">Gaze Error in degrees</span><br>
+           Improve <span class="hi">robustness</span> across varied lighting conditions</p></div>
+    </div>
+    <p class="sub" style="font-size:2.0rem;margin-top:1.4rem">
+      <span class="hi">FoGaze</span> — turning “a glance” into “a grasp”.</p>
+  </section>
+
+  <div class="prog" id="prog"></div>
+</div>
+<div class="footer"><span>FoGaze · Chanachol Polketkit · KAITO–Kanagawa Exchange</span><span id="pageno"></span></div>
+<div class="hint">← → / Space to navigate · F fullscreen</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  let i=0;
+  function show(n){
+    i=Math.max(0,Math.min(slides.length-1,n));
+    slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+    document.getElementById('prog').style.width=((i+1)/slides.length*100)+'%';
+    document.getElementById('pageno').textContent=(i+1)+' / '+slides.length;
+  }
+  document.addEventListener('keydown',e=>{
+    if(['ArrowRight','ArrowDown',' ','PageDown'].includes(e.key)){show(i+1);e.preventDefault();}
+    else if(['ArrowLeft','ArrowUp','PageUp'].includes(e.key)){show(i-1);e.preventDefault();}
+    else if(e.key==='Home')show(0); else if(e.key==='End')show(slides.length-1);
+    else if(e.key.toLowerCase()==='f'){if(!document.fullscreenElement)document.documentElement.requestFullscreen();else document.exitFullscreen();}
+  });
+  document.addEventListener('click',e=>{if(!e.target.closest('a'))show(i+1)});
+  show(0);
+</script>
+</body>
+</html>

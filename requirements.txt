@@ -2,7 +2,8 @@ opencv-python>=4.8.0
 mediapipe>=0.10.0,<0.10.10  # pin to avoid API migration to mp.tasks
 numpy>=1.24.0
 ultralytics>=8.0.0
-pyttsx3>=2.90
+pyttsx3>=2.90          # espeak-ng fallback voice
+piper-tts>=1.4.0       # preferred natural neural voice (see README for model)
 Pillow>=10.0.0
 # Uncomment the line below for real OCR support:
 # pytesseract>=0.3.10

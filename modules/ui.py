@@ -24,6 +24,7 @@ class Theme:
     BG_TOAST       = (0x14, 0x14, 0x28)  # toast bg
     ACCENT_CYAN    = (0xFF, 0xFF, 0x00)  # calibration targets
     ACCENT_RED     = (0x32, 0x32, 0xFF)  # gaze cursor
+    ACCENT_BLUE    = (0xFF, 0x90, 0x14)  # magnetic snap point (BGR)
     ACCENT_GREEN   = (0x64, 0xC8, 0x00)  # calibrated / success
     ACCENT_ORANGE  = (0x00, 0xA5, 0xFF)  # warning / countdown
     TEXT_MAIN      = (0xE6, 0xDC, 0xDC)  # light grey text

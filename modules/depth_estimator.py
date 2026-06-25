@@ -23,6 +23,8 @@ OPTS = {
     "off_x": 0,
     "off_y": 0,
     "cmap_idx": 2,
+    "snap_strength": 0.6,   # blue snap-point magnetism (0 = off → pure gaze)
+    "gaze_smooth": 0.7,     # One-Euro smoothing (0 = snappy, 1 = very steady)
 }
 
 

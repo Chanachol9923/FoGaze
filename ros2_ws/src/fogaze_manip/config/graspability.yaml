@@ -11,3 +11,15 @@ pickup_planner:
     max_reach_m: 0.85      # farther than this cannot be reached
     gripper_max_m: 0.08    # widest object the gripper can close on (Panda ~8cm)
     min_size_m: 0.02       # smaller is treated as detection noise
+
+# scene_publisher mirrors detections into the MoveIt planning scene and lays
+# down a static table so RViz shows a tabletop the arm plans above.
+scene_publisher:
+  ros__parameters:
+    arm_base_frame: "panda_link0"
+    camera_frame: "camera_color_optical_frame"
+    update_hz: 4.0
+    support_surface: true       # set false for a wall/ceiling-mounted arm
+    table_id: "table_surface"
+    table_size: [0.5, 1.0, 0.3]    # x, y, z extents (m)
+    table_center: [0.55, 0.0, 0.0]  # centre in arm base frame; top at z=0.15
