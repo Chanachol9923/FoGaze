@@ -2,9 +2,14 @@ __pycache__/
 *.pyc
 *.pkl
 *.task
+# downloaded YOLO weights (e.g. yolov8s-worldv2.pt)
+*.pt
 experiments/
 calibration.npz
 models/
+
+# Vendored third-party clone (has its own git history)
+ros2_ws/src/pymoveit2/
 
 # ROS 2 colcon build artifacts
 ros2_ws/build/
