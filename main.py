@@ -27,6 +27,7 @@ import imgui
 import numpy as np
 
 from eyetrax.gaze import GazeEstimator
+from eyetrax.models import create_model
 from eyetrax.filters import (
     KalmanEMASmoother,
     KDESmoother,
@@ -723,6 +724,17 @@ def _open_face_cam(index, exposure=-1):
 PANEL_W = 268  # left panel width (px)
 MODELS_DIR = Path(__file__).resolve().parent / "models"
 
+# Gaze regressors selectable from the GUI.  ridge = fast closed-form linear
+# (default, robust); tiny_mlp = small neural net trained on the calibration
+# points (a few seconds, can fit mild non-linearity but may jitter/overfit);
+# svr = linear support-vector regressor.  Switching model needs a re-calibrate
+# because the new model starts untrained.
+GAZE_MODELS = [
+    ("Ridge (fast, default)", "ridge"),
+    ("Tiny MLP (trained NN)", "tiny_mlp"),
+    ("SVR (linear SVM)", "svr"),
+]
+
 
 def _stat_row(label, value, value_rgb=(0.90, 0.91, 0.94)):
     """One aligned 'Label    value' row inside the status card."""
@@ -738,7 +750,7 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
                      cal_mode=None, cal_step=None, cal_progress=None,
                      face_tex_id=None, depth_tex_id=None,
                      eye_tex_id=None, stereo=False, cal_frac=None,
-                     detector=None):
+                     detector=None, gaze_model_name="ridge"):
     """Left-side MainMenu panel. Returns action string or None."""
     from modules.depth_estimator import OPTS, COLORMAPS
     flags = (imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_RESIZE |
@@ -779,6 +791,15 @@ def _draw_main_menu(gui, fps_val=0, show_depth=False,
             action = 'recenter'
         if imgui.button("Re-calibrate Gaze  (C)", -1, 38):
             action = 'gaze_cal'
+
+        # ── Gaze model: switching re-calibrates with the chosen regressor ─
+        gm_labels = [m[0] for m in GAZE_MODELS]
+        gm_cur = next((i for i, m in enumerate(GAZE_MODELS)
+                       if m[1] == gaze_model_name), 0)
+        changed, gm_idx = imgui.combo("Gaze model", gm_cur, gm_labels)
+        if changed and gm_idx != gm_cur:
+            action = ('set_gaze_model', GAZE_MODELS[gm_idx][1])
+
         if imgui.button("Calibrate Cameras  (V)", -1, 38):
             action = 'cam_cal'
 
@@ -1814,6 +1835,7 @@ def main():
     print(f"[FoGaze] Creating GazeEstimator (model={args.model}) ...")
     gaze_estimator = GazeEstimator(model_name=args.model,
                                    blink_threshold_ratio=args.blink_ratio)
+    gaze_model_name = args.model  # live-switchable from the GUI
 
     # Face-camera undistortion — created here (before calibration) so the
     # SAME correction is applied during calibration and at runtime.
@@ -2348,7 +2370,7 @@ def main():
                        ) if focused_rel else "--"
             depth_txt = (f"{int(focused_depth_cm)}cm"
                          if focused_depth_cm is not None else "--")
-            tracker_txt = f"{args.model.upper()} | {args.filter.upper()}"
+            tracker_txt = f"{gaze_model_name.upper()} | {args.filter.upper()}"
             gaze_txt = f"({gx_scene}, {gy_scene})"
             _scene_src = ("SIM" if sim_mode else
                           "Stereo" if stereo_mode else "PrimeSense")
@@ -2387,6 +2409,7 @@ def main():
                     eye_tex_id=gui.eye_texture_id,
                     stereo=stereo_mode,
                     detector=detector,
+                    gaze_model_name=gaze_model_name,
                 )
                 if action == 'quit':
                     _trigger_quit = True
@@ -2407,6 +2430,14 @@ def main():
                     except Exception as e:
                         print(f"[FoGaze] Model swap failed: {e}")
                         topbar.toast("Model load failed")
+                elif isinstance(action, tuple) and action[0] == 'set_gaze_model':
+                    # New regressor starts untrained → re-calibrate to apply it.
+                    gaze_model_name = action[1]
+                    gaze_estimator.model = create_model(gaze_model_name)
+                    print(f"[FoGaze] Gaze model -> {gaze_model_name}, "
+                          f"re-calibrating...")
+                    topbar.toast(f"Gaze model: {gaze_model_name} — calibrating")
+                    _trigger_recal = True
 
                 gui.render()
 
